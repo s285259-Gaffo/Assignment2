@@ -80,9 +80,8 @@ def detect_lanes_gold(bev_image):
     blur = cv2.GaussianBlur(gray, (5, 5), 0).astype(np.float32)
     
     # 2. Filtro spaziale GOLD (Esalta transizioni "Scuro - Chiaro - Scuro")
-    # Ignora in automatico strisce pedonali larghe e oggetti enormi
-    # Nella BEV larga 800px e 5 metri di strada, una striscia di 15cm occupa circa 24 pixel.
-    # Quindi usiamo una distanza spaziale tau di circa 12 pixel
+    # Tau = 12 pixel corrisponde a circa 15cm in BEV.
+    # Un ridge filter rileva oggetti di spessore circa 2*tau.
     tau = 12
     left_diff = np.zeros_like(blur)
     right_diff = np.zeros_like(blur)
@@ -97,86 +96,121 @@ def detect_lanes_gold(bev_image):
     gold_filter[gold_filter < 0] = 0
     
     # 3. Soglia sul filtro per ottenere un'immagine binaria chiara
-    # Più permissiva per linee tratteggiate deboli in scena urbana.
-    _, thresh = cv2.threshold(gold_filter, 18, 255, cv2.THRESH_BINARY)
+    # Riduciamo la soglia a 20 per recuperare le linee sbiadite (come quella a sx nell'immagine)
+    # ma manteniamo i filtri morfologici per pulire il rumore dell'asfalto
+    _, thresh = cv2.threshold(gold_filter, 20, 255, cv2.THRESH_BINARY)
     thresh = thresh.astype(np.uint8)
+    
+    # FILTRO SULLO SPESSORE E ORIENTAMENTO (Morfologia Selettiva)
+    # 1. Eliminiamo rumore orizzontale o spilli troppo sottili (crepe)
+    kernel_thickness = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_thickness)
+    
+    # 2. Rinforziamo la verticalità (fondamentale per linee sbiadite)
+    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 10))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel_vertical)
     
     # Puliamo piccolo rumore residuo
     kernel_clean = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_clean)
+    
+    # FILTRO PER ESCLUDERE OGGETTI GRANDI (veicoli, pullman)
+    # Identifichiamo zone "blackout" causate da oggetti grandi che riempiono la BEV verticalmente.
+    # Un veicolo davanti proiettato in BEV appare come una colonna scura verticale di pixel.
+    # Contiamo i pixel "accesi" per ogni colonna; se una colonna è troppo piena (>60% della BEV)
+    # è sicuramente un ostacolo, non una linea. La mascheriamo per il rilevamento linee.
+    raw_occupancy = np.sum(thresh // 255, axis=0)
+    max_occupancy = 800  # Altezza della BEV
+    occupancy_threshold = 0.60 * max_occupancy
+    
+    # Creiamo una maschera che scarta colonne in cui ci sono troppi pixel bianchi
+    # (tipicamente linee spurie causate dagli oggetti)
+    obstacle_mask = raw_occupancy > occupancy_threshold
+    
+    # Dilatiamo leggermente la maschera per non perdere linee ai bordi dell'ostacolo
+    obstacle_mask = cv2.dilate(obstacle_mask.astype(np.uint8), np.ones((1, 15)), iterations=1) > 0
+    
+    # Applichiamo la maschera all'immagine threshold
+    # Dove c'è un ostacolo, poniamo i valori a 0 (nero)
+    for x in range(BEV_SIZE[0]):
+        if obstacle_mask[x]:
+            thresh[:, x] = 0
     
     # 4. Istogramma per trovare le linee: sommiamo le colonne
     raw_histogram = np.sum(thresh // 255, axis=0)
     
     # Tagliamo via i margini estremi (ancora meno aggressivo a sinistra)
     raw_histogram[:20] = 0
-    raw_histogram[-80:] = 0
+    raw_histogram[-60:] = 0 # Taglio conservativo a dx
     
-    # Raggruppiamo pixel vicini
-    histogram = np.convolve(raw_histogram, np.ones(15), mode='same')
+    # Raggruppiamo pixel vicini con una convoluzione più stretta
+    histogram = np.convolve(raw_histogram, np.ones(10), mode='same').astype(np.float32)
     
     # 5. Cerca i picchi nell'istogramma (corsia sinistra e destra)
     midpoint = BEV_SIZE[0] // 2
     
-    # Soglia minima base molto permissiva.
-    threshold_hist = 10
+    # ALGORITMO GOLD PURO: Cerchiamo il picco massimo nella metà sinistra e destra
+    # Nessuna zona di ricerca rigida, lasciam che l'istogramma guidi la ricerca
+    # Solo dividiamo tra sinistra e destra del centro della BEV
+    
+    # Validazione larghezza corsia: una corsia standard è 3.5m
+    # In BEV a distanze 6-25m, questo rappresenta circa 100-280px
+    min_lane_width = 90
+    max_lane_width = 300
 
-    lanes = [] # Conterrà dizionari con x e 'type'
+    # Soglia minima per l'istogramma
+    threshold_hist = 8
+
+    lanes = [] 
 
     def lane_metrics(x):
-        # Analisi verticale su ROI: aumentiamo la finestra di analisi per catturare più tratti.
-        strip = thresh[:, max(0, x-10):min(BEV_SIZE[0], x+10)]
-        roi = strip[100:750, :] 
-        row_on = np.sum(roi, axis=1) > 0
+        # ROI per catturare linee
+        strip = thresh[:, max(0, x-25):min(BEV_SIZE[0], x+25)]
+        row_on = np.sum(strip, axis=1) > 0
         ratio = np.count_nonzero(row_on) / float(len(row_on))
 
-        # Numero di segmenti verticali accesi.
-        changes = np.diff(row_on.astype(np.uint8))
+        # Chiusura per gap piccoli (usura della vernice)
+        row_on_uint8 = row_on.astype(np.uint8) * 255
+        kernel_fill = np.ones((30, 1), np.uint8)
+        row_on_filled = cv2.morphologyEx(row_on_uint8, cv2.MORPH_CLOSE, kernel_fill) > 0
+        
+        changes = np.diff(row_on_filled.astype(np.uint8))
         starts = np.where(changes == 1)[0] + 1
-        ends = np.where(changes == -1)[0] + 1
-        if row_on[0]:
-            starts = np.r_[0, starts]
-        if row_on[-1]:
-            ends = np.r_[ends, len(row_on)]
+        segments = int(len(starts))
+        return ratio, segments
 
-        seg_lengths = (ends - starts) if len(starts) == len(ends) and len(starts) > 0 else np.array([], dtype=np.int32)
-        segments = int(len(seg_lengths))
-        avg_seg_len = float(np.mean(seg_lengths)) if segments > 0 else 0.0
-        return ratio, segments, avg_seg_len
+    # Cerchiamo il picco massimo nella METÀ SINISTRA della BEV
+    left_half = histogram[50:midpoint]
+    if left_half.size > 0:
+        left_peak = float(np.max(left_half))
+        if left_peak > threshold_hist:
+            left_x = int(np.argmax(left_half)) + 50
+            ratio, segments = lane_metrics(left_x)
+            if ratio > 0.10:
+                lane_type = "tratteggiata" if (segments >= 3 or ratio < 0.55) else "continua"
+                lanes.append({'x': left_x, 'type': lane_type, 'score': left_peak})
 
-    # Lato sinistro
-    left_side = histogram[20:midpoint]
-    left_peak = float(np.max(left_side)) if left_side.size else 0.0
-    left_thr = max(threshold_hist, 0.25 * left_peak)
-    if left_peak > left_thr:
-        left_x = int(np.argmax(left_side)) + 20
-        ratio, segments, avg_seg_len = lane_metrics(left_x)
-        # Logica ultra-permissiva per tratteggiata: basta avere un ratio basso (< 55%) 
-        # o più di un segmento (evita che piccoli buchi convertano tutto in continua).
-        lane_type = "tratteggiata" if (ratio < 0.60 or segments >= 2) else "continua"
-        lanes.append({'x': left_x, 'type': lane_type, 'score': left_peak, 'ratio': ratio})
+    # Cerchiamo il picco massimo nella METÀ DESTRA della BEV
+    right_half = histogram[midpoint:750]
+    if right_half.size > 0:
+        right_peak = float(np.max(right_half))
+        if right_peak > threshold_hist:
+            right_x = int(np.argmax(right_half)) + midpoint
+            ratio, segments = lane_metrics(right_x)
+            lane_type = "tratteggiata" if (segments >= 3 or ratio < 0.55) else "continua"
+            lanes.append({'x': right_x, 'type': lane_type, 'score': right_peak})
 
-    # Lato destro: estendiamo ricerca fino a 760 per non perdere corsie vicine al bordo.
-    right_side = histogram[midpoint:760]
-    right_peak = float(np.max(right_side)) if right_side.size else 0.0
-    right_thr = max(threshold_hist, 0.25 * right_peak)
-    if right_peak > right_thr:
-        right_x = int(np.argmax(right_side)) + midpoint
-        ratio, segments, avg_seg_len = lane_metrics(right_x)  
-        lane_type = "tratteggiata" if (ratio < 0.60 or segments >= 2) else "continua"
-        lanes.append({'x': right_x, 'type': lane_type, 'score': right_peak, 'ratio': ratio})
-
-    # Se un candidato e' debolissimo rispetto al lato opposto, scartalo (tipico rumore locale).
+    # Filtro: scartiamo il picco più debole se è troppo inferiore all'altro
     if len(lanes) == 2:
         s0, s1 = lanes[0]['score'], lanes[1]['score']
-        if min(s0, s1) < 0.15 * max(s0, s1):
+        if min(s0, s1) < 0.20 * max(s0, s1):
             keep_idx = 0 if s0 >= s1 else 1
             lanes = [lanes[keep_idx]]
 
-    # VALIDAZIONE GEOMETRICA più permissiva su scene urbane/intersezioni.
+    # VALIDAZIONE: la larghezza tra le linee deve essere plausibile per una corsia
     if len(lanes) == 2:
         width = lanes[1]['x'] - lanes[0]['x']
-        if width < 220 or width > 760:
+        if width < min_lane_width or width > max_lane_width:
             lanes = []
 
     # Ripulisci campi di debug non necessari.
@@ -188,37 +222,80 @@ def detect_lanes_gold(bev_image):
 
 def detect_obstacles(bev_gray, lanes):
     """
-    Rileva ostacoli (es. un'auto) all'interno del corridoio formato dalle due corsie.
-    Se le corsie mancano o siamo ad un incrocio nudo, proietta un corridoio virtuale di salvataggio.
-    Restituisce la distanza stimata in metri, se c'è un ostacolo.
+    Rileva ostacoli (es. un'auto, pedoni) rigorosamente all'interno della corsia di marcia.
+    Il corridoio di analisi è fisso e centrato per guardare solo cosa succede "davanti al muso".
     """
-    lane_x_positions = [int(l['x']) for l in lanes]
-
-    if len(lanes) == 2:
-        left_x = lanes[0]['x']
-        right_x = lanes[1]['x']
-    elif len(lanes) == 1:
-        # Se ce n'è una sola in BEV cerchiamo di indovinare la seconda distanziata di 560px (~3.5m)
-        if lanes[0]['x'] < BEV_SIZE[0] // 2:
-            left_x = lanes[0]['x']
-            right_x = left_x + 560 
-        else:
-            right_x = lanes[0]['x']
-            left_x = right_x - 560
-    else:
-        # Nessuna linea (es. incrocio): CORRIDOIO VIRTUALE CENTRALE DI SALVATAGGIO:
-        left_x = 120
-        right_x = 680
-        
-    # Limiti validi per il bounding box BEV
-    left_x = max(0, left_x)
-    right_x = min(BEV_SIZE[0], right_x)
+    # ZONA DI COLLISIONE FISSA (Basata sulla geometria della corsia centrale)
+    # BEV width = 800px. Le linee sono circa a 200 e 600.
+    # Il corridoio di "pericolo immediato" è tra 250 e 550 pixel.
+    # Questo esclude pedoni sul marciapiede o auto in altre corsie.
+    left_x = 260
+    right_x = 540
     
-    corridor_width = right_x - left_x - 60
-    if corridor_width <= 0:
-        return None, None, None
+    corridor_width = right_x - left_x
+    # Analizziamo solo questa fetta centrale della BEV
+    corridor = bev_gray[:, left_x: right_x]
+    
+    # Maschera ostacoli: cerchiamo anomalie rispetto al colore dell'asfalto centrale
+    blur_corridor = cv2.GaussianBlur(corridor, (5, 5), 0)
+    edges = cv2.Canny(blur_corridor, 50, 150)
+
+    # Mediana della riga per trovare oggetti che "staccano" dal grigio stradale
+    row_median = np.median(blur_corridor, axis=1, keepdims=True)
+    photometric_anomaly = (np.abs(blur_corridor.astype(np.int16) - row_median.astype(np.int16)) > 25).astype(np.uint8) * 255
+
+    combined_mask = cv2.bitwise_or(edges, photometric_anomaly)
+    
+    # Pulizia morfologica per unire i pezzi dell'ostacolo
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+    
+    # Sopprimiamo rumore orizzontale (es. giunzioni asfalto)
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 20))
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, vertical_kernel)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(combined_mask)
+
+    obstacle_y = None
+    obstacle_x = None
+    best_bottom = -1
+    # Un ostacolo deve avere una dimensione minima per non essere un sasso o un'ombra
+    min_area = 400 
+
+    for lbl in range(1, num_labels):
+        x = stats[lbl, cv2.CC_STAT_LEFT]
+        y = stats[lbl, cv2.CC_STAT_TOP]
+        w = stats[lbl, cv2.CC_STAT_WIDTH]
+        h = stats[lbl, cv2.CC_STAT_HEIGHT]
+        area = stats[lbl, cv2.CC_STAT_AREA]
+
+        if area < min_area or w < 30 or h < 30:
+            continue
+
+        # Scarta oggetti troppo slanciati che potrebbero essere pali o residui di lane marking
+        if h > 4 * w:
+            continue
+
+        bottom = y + h
+        # Prendiamo l'ostacolo più vicino (quello con la base più in basso nella BEV)
+        if bottom > best_bottom:
+            best_bottom = bottom
+            obstacle_x = x + (w // 2)
+
+    if best_bottom > 0:
+        obstacle_y = int(min(BEV_SIZE[1] - 1, best_bottom))
+            
+    if obstacle_y is not None:
+        # Calcolo distanza (lineare nella BEV: Y=800 -> 6.0m, Y=0 -> 25.0m)
+        z_far = 25.0
+        z_near = 6.0
+        distance = z_far - (obstacle_y / float(BEV_SIZE[1])) * (z_far - z_near)
         
-    corridor = bev_gray[:, int(left_x + 30): int(right_x - 30)]
+        # Riportiamo X al sistema BEV globale
+        obstacle_x_bev = left_x + obstacle_x
+        return obstacle_x_bev, obstacle_y, distance
+        
+    return None, None, None
     
     # Maschera ostacoli robusta: combiniamo bordi + anomalia fotometrica rispetto alla riga stradale.
     # Questo riduce i falsi positivi su crepe sottili e recupera pedoni/auto in BEV distorta.
