@@ -181,7 +181,7 @@ def detect_lanes_gold(bev_image):
     
     # Validazione larghezza corsia
     min_lane_width = 90
-    max_lane_width = 400 # Aumentato a 400: in BEV la scala può variare, diamogli più tolleranza!
+    max_lane_width = 600 # [] distanza massima tra due linee rilevabili (distanza tra quella di sx e quella di dx)
 
     # Soglia minima per l'istogramma
     # PARAMETRO: abbassato drasticamente da 8 a 3. Se la tratteggiata ha pochissimi pixel sopravvive!
@@ -210,7 +210,7 @@ def detect_lanes_gold(bev_image):
         return ratio, segments
 
     # Cerchiamo il picco massimo nella METÀ SINISTRA della BEV
-    left_half = histogram[50:midpoint]
+    left_half = histogram[50:midpoint]      # [] GUARDA SOLO DA 50PX IN POI A SX
     if left_half.size > 0:
         left_peak = float(np.max(left_half))
         if left_peak > threshold_hist:
@@ -238,7 +238,7 @@ def detect_lanes_gold(bev_image):
     # l'altra continua era "troppo forte", così gli permettiamo di sopravvivere!
     if len(lanes) == 2:
         s0, s1 = lanes[0]['score'], lanes[1]['score']
-        if min(s0, s1) < 0.05 * max(s0, s1):
+        if min(s0, s1) < 0.04 * max(s0, s1):            # [] DA MODIFICARE A 0.05 OPPURE ABBASSARE SE NON RILEVA LINEE
             keep_idx = 0 if s0 >= s1 else 1
             lanes = [lanes[keep_idx]]
 
@@ -268,10 +268,11 @@ def detect_obstacles(bev_gray, lanes):
     """
     # ZONA DI COLLISIONE FISSA (Basata sulla geometria della corsia centrale)
     # BEV width = 800px. Le linee sono circa a 200 e 600.
-    # Il corridoio di "pericolo immediato" è tra 250 e 550 pixel.
-    # Questo esclude pedoni sul marciapiede o auto in altre corsie.
-    left_x = 260
-    right_x = 540
+    # Il corridoio di "pericolo immediato" è tra 320 e 480 pixel.
+    # Restretto ulteriormente per guardare in modo molto mirato davanti 
+    # ed evitare l'auto nera che si stringe dalla corsia a destra.
+    left_x = 320
+    right_x = 480
     
     corridor_width = right_x - left_x
     # Analizziamo solo questa fetta centrale della BEV
@@ -299,6 +300,7 @@ def detect_obstacles(bev_gray, lanes):
 
     obstacle_y = None
     obstacle_x = None
+    obstacle_center_y = None
     best_bottom = -1
     # Un ostacolo deve avere una dimensione minima per non essere un sasso o un'ombra
     min_area = 400 
@@ -322,6 +324,7 @@ def detect_obstacles(bev_gray, lanes):
         if bottom > best_bottom:
             best_bottom = bottom
             obstacle_x = x + (w // 2)
+            obstacle_center_y = y + (h // 2) # IL CENTRO DELL'OSTACOLO, IN ALTO RISPETTO ALLE RUOTE
 
     if best_bottom > 0:
         obstacle_y = int(min(BEV_SIZE[1] - 1, best_bottom))
@@ -334,9 +337,9 @@ def detect_obstacles(bev_gray, lanes):
         
         # Riportiamo X al sistema BEV globale
         obstacle_x_bev = left_x + obstacle_x
-        return obstacle_x_bev, obstacle_y, distance
+        return obstacle_x_bev, obstacle_y, distance, obstacle_center_y
         
-    return None, None, None
+    return None, None, None, None
     
     # Maschera ostacoli robusta: combiniamo bordi + anomalia fotometrica rispetto alla riga stradale.
     # Questo riduce i falsi positivi su crepe sottili e recupera pedoni/auto in BEV distorta.
@@ -505,14 +508,15 @@ def main():
                     cv2.line(bev, (x, 0), (x, BEV_SIZE[1]), c, 4)
                 
         # Opt 3: Ostacoli (sempre attivo! Sia con, sia senza corsie visibili)
-        obstacle_x, obstacle_y, distance = detect_obstacles(bev_gray, detected_lanes)
+        obstacle_x, obstacle_y, distance, obstacle_center_y = detect_obstacles(bev_gray, detected_lanes)
         if obstacle_y is not None:
             cv2.line(bev, (0, obstacle_y), (BEV_SIZE[0], obstacle_y), (0, 0, 255), 3)
             cv2.putText(bev, f"Ostacolo: {distance:.1f} m", (50, obstacle_y - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
-            # Usiamo il centro del blob ostacolo rilevato per proiezione precisa.
-            pt_bev = np.array([[[obstacle_x, obstacle_y]]], dtype=np.float32)
+            # Usiamo il centro del blob ostacolo rilevato per proiezione precisa del PALLINO ROSSO.
+            # ATTENZIONE: per la Y usiamo obstacle_center_y invece di obstacle_y (che è rimasto per la distanza)
+            pt_bev = np.array([[[obstacle_x, obstacle_center_y]]], dtype=np.float32)
             pt_orig = cv2.perspectiveTransform(pt_bev, INV_IPM_MATRIX)
             ou, ov = int(pt_orig[0][0][0]), int(pt_orig[0][0][1])
 
