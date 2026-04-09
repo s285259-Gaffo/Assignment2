@@ -3,6 +3,7 @@ import numpy as np
 import sys
 import glob
 
+# -
 # Parametri della telecamera forniti dall'assignment
 IMAGE_SIZE = (1920, 1080) # (width, height)
 PRINCIPAL_POINT = (970, 483) # (cx, cy)
@@ -71,6 +72,27 @@ INV_IPM_MATRIX = np.linalg.inv(IPM_MATRIX)
 def apply_ipm(image):
     return cv2.warpPerspective(image, IPM_MATRIX, BEV_SIZE, flags=cv2.INTER_LINEAR)
 
+def iterative_thresholding(img):
+    """Calcola la soglia ottima dinamicamente in base alle luci/ombre dell'immagine. (Formula Prof)"""
+    # Ignoriamo gli zeri assoluti, altrimenti la media crolla verso il basso considerandoli parte dell'asfalto
+    active_pixels = img[img > 0]
+    if active_pixels.size == 0:
+        return 15.0
+    if np.max(active_pixels) == np.min(active_pixels): 
+        return 15.0
+        
+    th = (float(np.min(active_pixels)) + float(np.max(active_pixels))) / 2.0
+    for _ in range(10):
+        region_a = active_pixels[active_pixels >= th]
+        region_b = active_pixels[active_pixels < th]
+        if region_a.size == 0 or region_b.size == 0: 
+            break
+        new_th = (region_a.mean() + region_b.mean()) / 2.0
+        if abs(new_th - th) < 0.5: 
+            break
+        th = new_th
+    return th
+
 def detect_lanes_gold(bev_image):
     """
     Rilevamento linee percorsa sulla BEV. Implementazione filtri GOLD (dark-light-dark).
@@ -95,15 +117,18 @@ def detect_lanes_gold(bev_image):
     gold_filter = np.minimum(left_diff, right_diff)
     gold_filter[gold_filter < 0] = 0
     
-    # 3. Soglia sul filtro per ottenere un'immagine binaria chiara
-    # Riduciamo la soglia a 20 per recuperare le linee sbiadite (come quella a sx nell'immagine)
-    # ma manteniamo i filtri morfologici per pulire il rumore dell'asfalto
-    _, thresh = cv2.threshold(gold_filter, 20, 255, cv2.THRESH_BINARY)
+    # 3. Soglia iterativa (Adattiva alla luce) invece di fissa a 20
+    # Usiamo un margine (es. 0.8) per essere sicuri di prendere anche linee sbiadite all'ombra
+    th_opt = iterative_thresholding(gold_filter)
+    th_final = max(12, th_opt * 0.8) # PARAMETRO: abbassa (es. 0.6) se le linee nelle zone d'ombra spariscono
+    
+    _, thresh = cv2.threshold(gold_filter, th_final, 255, cv2.THRESH_BINARY)
     thresh = thresh.astype(np.uint8)
     
     # FILTRO SULLO SPESSORE E ORIENTAMENTO (Morfologia Selettiva)
     # 1. Eliminiamo rumore orizzontale o spilli troppo sottili (crepe)
-    kernel_thickness = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+    # PARAMETRO: Se una linea sbiadita sparisce dopo questo, riduci a (3, 1) o (2, 1)
+    kernel_thickness = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_thickness)
     
     # 2. Rinforziamo la verticalità (fondamentale per linee sbiadite)
@@ -117,11 +142,13 @@ def detect_lanes_gold(bev_image):
     # FILTRO PER ESCLUDERE OGGETTI GRANDI (veicoli, pullman)
     # Identifichiamo zone "blackout" causate da oggetti grandi che riempiono la BEV verticalmente.
     # Un veicolo davanti proiettato in BEV appare come una colonna scura verticale di pixel.
-    # Contiamo i pixel "accesi" per ogni colonna; se una colonna è troppo piena (>60% della BEV)
-    # è sicuramente un ostacolo, non una linea. La mascheriamo per il rilevamento linee.
+    # Contiamo i pixel "accesi" per ogni colonna.
+    # PARAMETRO CRITICO: 0.60 era troppo basso! Una linea continua dritta occupa il 100% della colonna
+    # (è verticale da cima a fondo). Se si supera l'110% è impossibile, ma se usiamo 0.95
+    # evitiamo di auto-cancellare le linee rettilinee scambiandole per grandi ostacoli neri.
     raw_occupancy = np.sum(thresh // 255, axis=0)
     max_occupancy = 800  # Altezza della BEV
-    occupancy_threshold = 0.60 * max_occupancy
+    occupancy_threshold = 0.95 * max_occupancy
     
     # Creiamo una maschera che scarta colonne in cui ci sono troppi pixel bianchi
     # (tipicamente linee spurie causate dagli oggetti)
@@ -139,39 +166,42 @@ def detect_lanes_gold(bev_image):
     # 4. Istogramma per trovare le linee: sommiamo le colonne
     raw_histogram = np.sum(thresh // 255, axis=0)
     
-    # Tagliamo via i margini estremi (ancora meno aggressivo a sinistra)
-    raw_histogram[:20] = 0
-    raw_histogram[-60:] = 0 # Taglio conservativo a dx
+    # Tagliamo via i margini estremi molto meno!
+    # L'auto davanti a noi ci costringe ad avere linee molto laterali.
+    raw_histogram[:10] = 0
+    raw_histogram[-20:] = 0 # Prima tagliava via 60px! Se la destra è sul bordo la perdevamo.
     
-    # Raggruppiamo pixel vicini con una convoluzione più stretta
-    histogram = np.convolve(raw_histogram, np.ones(10), mode='same').astype(np.float32)
+    # Raggruppiamo pixel vicini con una convoluzione PIÙ LARGA (da 10 a 40)
+    # PARAMETRO: Se la linea è "sghemba" (storta/diagonale) i pixel si sparpagliano su tante X diverse.
+    # Una convoluzione più larga raggruppa pixel anche se la linea non è perfettamente dritta verticale!
+    histogram = np.convolve(raw_histogram, np.ones(40), mode='same').astype(np.float32)
     
     # 5. Cerca i picchi nell'istogramma (corsia sinistra e destra)
     midpoint = BEV_SIZE[0] // 2
     
-    # ALGORITMO GOLD PURO: Cerchiamo il picco massimo nella metà sinistra e destra
-    # Nessuna zona di ricerca rigida, lasciam che l'istogramma guidi la ricerca
-    # Solo dividiamo tra sinistra e destra del centro della BEV
-    
-    # Validazione larghezza corsia: una corsia standard è 3.5m
-    # In BEV a distanze 6-25m, questo rappresenta circa 100-280px
+    # Validazione larghezza corsia
     min_lane_width = 90
-    max_lane_width = 300
+    max_lane_width = 400 # Aumentato a 400: in BEV la scala può variare, diamogli più tolleranza!
 
     # Soglia minima per l'istogramma
-    threshold_hist = 8
+    # PARAMETRO: abbassato drasticamente da 8 a 3. Se la tratteggiata ha pochissimi pixel sopravvive!
+    threshold_hist = 3
 
     lanes = [] 
 
     def lane_metrics(x):
-        # ROI per catturare linee
-        strip = thresh[:, max(0, x-25):min(BEV_SIZE[0], x+25)]
+        # ROI più larga per seguire le CURVE senza perderle (da +-25 a +-55)
+        # PARAMETRO: Aumenta 55 a 70 se la strada curva tantissimo e la linea "esce" dall'area di scansione
+        strip = thresh[:, max(0, x-55):min(BEV_SIZE[0], x+55)]
         row_on = np.sum(strip, axis=1) > 0
         ratio = np.count_nonzero(row_on) / float(len(row_on))
 
         # Chiusura per gap piccoli (usura della vernice)
         row_on_uint8 = row_on.astype(np.uint8) * 255
-        kernel_fill = np.ones((30, 1), np.uint8)
+        # PARAMETRO: Se ti rileva una tratteggiata quando è continua rovinata, aumenta (40, 1) per fondere meglio i buchi
+        # ATTENZIONE: l'avevo impostato a (40,1) ma era TROPPO AGGRESSIVO! Unendo 40 pixel verticali,
+        # fondeva tra loro i segmenti della linea tratteggiata trasformandola in continua! Abbassato a (15,1)
+        kernel_fill = np.ones((15, 1), np.uint8)
         row_on_filled = cv2.morphologyEx(row_on_uint8, cv2.MORPH_CLOSE, kernel_fill) > 0
         
         changes = np.diff(row_on_filled.astype(np.uint8))
@@ -186,8 +216,10 @@ def detect_lanes_gold(bev_image):
         if left_peak > threshold_hist:
             left_x = int(np.argmax(left_half)) + 50
             ratio, segments = lane_metrics(left_x)
-            if ratio > 0.10:
-                lane_type = "tratteggiata" if (segments >= 3 or ratio < 0.55) else "continua"
+            if ratio > 0.02:
+                # PARAMETRO innalzato (0.55 -> 0.75). Se solo il 75% della colonna è riempito da pixel bianchi è tratteggiata per forza!
+                # La tratteggiata qua era molto sbiadita, abbassato limite esistenza a 0.02
+                lane_type = "tratteggiata" if (segments > 2 or ratio < 0.75) else "continua"
                 lanes.append({'x': left_x, 'type': lane_type, 'score': left_peak})
 
     # Cerchiamo il picco massimo nella METÀ DESTRA della BEV
@@ -197,13 +229,16 @@ def detect_lanes_gold(bev_image):
         if right_peak > threshold_hist:
             right_x = int(np.argmax(right_half)) + midpoint
             ratio, segments = lane_metrics(right_x)
-            lane_type = "tratteggiata" if (segments >= 3 or ratio < 0.55) else "continua"
-            lanes.append({'x': right_x, 'type': lane_type, 'score': right_peak})
+            if ratio > 0.02: 
+                lane_type = "tratteggiata" if (segments > 2 or ratio < 0.75) else "continua"
+                lanes.append({'x': right_x, 'type': lane_type, 'score': right_peak})
 
-    # Filtro: scartiamo il picco più debole se è troppo inferiore all'altro
+    # Filtro: scartiamo il picco più debole se è TROPPO inferiore all'altro
+    # PARAMETRO: abbassato da 0.20 a 0.05. Se la linea tratteggiata spariva perché
+    # l'altra continua era "troppo forte", così gli permettiamo di sopravvivere!
     if len(lanes) == 2:
         s0, s1 = lanes[0]['score'], lanes[1]['score']
-        if min(s0, s1) < 0.20 * max(s0, s1):
+        if min(s0, s1) < 0.05 * max(s0, s1):
             keep_idx = 0 if s0 >= s1 else 1
             lanes = [lanes[keep_idx]]
 
@@ -211,7 +246,13 @@ def detect_lanes_gold(bev_image):
     if len(lanes) == 2:
         width = lanes[1]['x'] - lanes[0]['x']
         if width < min_lane_width or width > max_lane_width:
-            lanes = []
+            # INVECE DI CANCELLARE ENTRAMBE LE LINEE (lanes = []), TENIAMO QUELLA PIÙ FORTE
+            # Spesso una linea è vera e forte, l'altra è un finto posizionamento (es. a bordo auto)
+            # che fa sballare la larghezza. Puniamo il falso positivo, salviamo la vera linea!
+            if lanes[0]['score'] >= lanes[1]['score']:
+                lanes = [lanes[0]]
+            else:
+                lanes = [lanes[1]]
 
     # Ripulisci campi di debug non necessari.
     for lane in lanes:

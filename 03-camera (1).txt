@@ -1,0 +1,223 @@
+Cameras for autonomous driving
+Massimo Violante
+Politecnico di Torino
+Dip. Automatica e Informatica
+
+Outline
+n
+Introduction
+n
+Camera parameters
+n
+Exercises
+2
+
+Outline
+n
+Introduction
+n
+Camera parameters
+n
+Exercises
+3
+
+Introduction
+n Cameras serves multiple purposes
+n Enhance visibility
+n Driver monitoring
+n Provides inputs for object and event detection and response systems
+4
+
+Camera locations
+5
+Rear view
+Surround view
+Mirrors view
+Front view
+Driver monitoring
+
+Enhance visibility – possibile usage
+n Parking assist 
+n Cross traffic alert 
+n Backover protection 
+n Trailer steering assist
+n Blind spot detect 
+n Rear collision warning 
+6
+
+Enhance visibility – possibile usage
+n Emergency braking, auto cruise control 
+n Pedestrian and vehicle detection 
+n Lane detection and keeping 
+n Traffic sign recognition 
+n Headlight control 
+n Bicycle recognition
+n Intersections
+7
+
+Driver monitoring
+n Driver drowsiness detection 
+n Driver distraction detection 
+n Airbag deployment
+n Seat belt adjustment
+n Driver authentication
+8
+
+Outline
+n
+Introduction
+n
+Camera parameters
+n
+Exercises
+9
+
+Camera parameters
+n Detection range, it is the distance that a camera can detect an object
+n Angular resolution, it is the ability to distinguish details of an object
+n Field of view, it is the extent of the observable world that is seen at any given moment
+10
+
+Camera parameters
+n Frame rate is the number of consecutive images that can be taken in one second (from 
+24 to 60 fps)
+n Focal length, distance between the lens and the image sensor when the subject is in focus
+11
+
+Detection range
+12
+ 
+w
+Į
+d
+o
+ 
+Obstacle
+Obstacle is 
+detected
+Braking 
+begins
+The vehicle 
+stops
+Reaction distance
+Braking distance
+𝑑≥𝑅𝑒𝑎𝑐𝑡𝑖𝑜𝑛𝐷𝑖𝑠𝑡𝑎𝑛𝑐𝑒+ 𝐵𝑟𝑎𝑘𝑖𝑛𝑔𝐷𝑖𝑠𝑡𝑎𝑛𝑐𝑒
+𝑅𝑒𝑎𝑐𝑡𝑖𝑜𝑛𝐷𝑖𝑠𝑡𝑎𝑛𝑐𝑒[𝑚] = 𝑆𝑝𝑒𝑒𝑑𝑘𝑚
+ℎ
+9 𝑅𝑒𝑎𝑐𝑡𝑖𝑜𝑛𝑇𝑖𝑚𝑒[𝑠] 9
+1
+3.6
+𝐵𝑟𝑎𝑘𝑖𝑛𝑔𝐷𝑖𝑠𝑡𝑎𝑛𝑐𝑒𝑚=
+𝑆𝑝𝑒𝑒𝑑![𝐾𝑚
+ℎ]
+250 9 𝑓
+𝑓=
+0.8 𝑓𝑜𝑟𝑑𝑟𝑦𝑎𝑠𝑝ℎ𝑎𝑙𝑡
+0.5 𝑓𝑜𝑟𝑤𝑒𝑡𝑎𝑠𝑝ℎ𝑎𝑙𝑡
+0.3 𝑓𝑜𝑟𝑠𝑛𝑜𝑤
+0.2 𝑓𝑜𝑟𝑖𝑐𝑒
+
+Outline
+n
+Introduction
+n
+Camera parameters
+n
+Exercises
+13
+
+Exercise
+n A sensor with the following characteristics is selected for an emergency braking system
+n The system identifies 1m high x 0.5m wide obstacles in the city (50 Km/h speed): 40,28m
+n You shall:
+n Select a suitable focal length
+n Compute the number of pixels a 1m x 0.5 m object at 40m takes on the sensor
+14
+1
+2.8 𝑖𝑛𝑐ℎ𝑒𝑠
+1920 pixels
+1080 pixels
+
+Solution
+n We need to compute the geometry of the 
+sensor
+n Width: Ws
+n Height: Hs
+n Pixel dimension (we assume a square pixel): p
+15
+𝑑= 1
+2.8 𝑖𝑛𝑐ℎ𝑒𝑠
+WS=1920 pixels
+HS=1080 pixels
+𝑑= 1
+2.8 𝑖𝑛𝑐ℎ𝑒𝑠=
+𝑊"
+! + 𝐻"
+!
+𝑊" = 1920
+1080 𝐻"
+𝑊" = 7.91𝑚𝑚
+𝐻" = 4.44𝑚𝑚
+𝑝= 7.91
+1920 = 0,0041𝑚𝑚
+𝑝= 4.44
+1080 = 0,0041𝑚𝑚
+
+Solution
+16
+1.5·w
+Į
+l
+d
+wo
+ 
+FOV
+lens
+sensor
+d
+f
+𝑆
+𝐼
+𝑆
+𝑑= 𝐼
+𝑓
+1,5𝑥3,75 + 0,5/2
+40,28
+= 1920𝑥0,0041
+𝑓
+𝑓= 53,97𝑚𝑚→𝑓= 54𝑚𝑚
+
+Solution
+17
+object
+lens
+sensor
+d
+f
+𝑆
+𝐼
+0,5𝑚
+40,28𝑚=
+𝐼
+54𝑚𝑚
+𝑆
+𝑑= 𝐼
+𝑓
+𝐼= 0.67 𝑚𝑚
+𝐼=
+0.67𝑚𝑚
+0.0041𝑚𝑚= 163𝑝𝑖𝑥𝑒𝑙𝑠
+Obstacle 1m x 0.5m @ 40,28m = 326x163 pixels
+
+Numerical exercise
+n The following camera set-up is being considered for an Emergency Braking system:
+n 8 megapixels Sony IMX219 sensor: 3280 x 2464 pixel;
+n 1.55μm × 1.55μm pixel size;
+n 8 mm lens.
+n Let’s assume the smallest object that shall be recognized is 0.75m wide and 1.5m tall, and 
+that it shall produce an image that is at least 20x20 pixels to be recognized. 
+n Assuming a system reaction time of 1 s, which is the maximum speed a vehicle could 
+travel for the Emergency Braking system to avoid the accident (i.e., bringing the car to a 
+full stop after the obstacle is recognized)?
+18
+

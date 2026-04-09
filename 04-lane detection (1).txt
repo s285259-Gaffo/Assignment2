@@ -1,0 +1,728 @@
+Lane Detection
+Massimo Violante
+Politecnico di Torino
+Dip. Automatica e Informatica
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+2
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+3
+
+Introduction
+n Lane detection is crucial for driver assistance systems and for autonomous vehicles
+n It is used to compute the position of the vehicle w.r.t. to the lane lines
+n The information can be used:
+n To warn the driver in case of potential involuntary lane crossing
+n To control the steering to maintain a desired position w.r.t. the lane lines
+n To compute the radius of curvature of the lane 
+4
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+5
+
+The image pipeline
+6
+Camera 
+calibration
+Distortion 
+correction
+Perspective 
+transformation
+Lane 
+detection
+Lane 
+curvature 
+computation
+Test
+Image
+Road
+Image
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+7
+
+Camera calibration
+n A camera is a mapping between the 3D world (object space) and a 2D image 
+n Camera can be modelled using matrices with properties that represent the camera 3D to 
+2D mapping 
+n The basic model is the pinhole model
+8
+
+Pinhole model
+n
+We consider the central projection of points in space onto a 
+plane
+n
+Centre of projection = origin of a Euclidean coordinate system
+n
+Plane Z = f is called the image plane or focal plane 
+n
+A point in space X = (X, Y, Z)T is mapped to the point on the 
+image plane where a line joining the point X to the centre C 
+of projection meets the image plane 
+n
+The point (X,Y,Z)T is mapped to the point (fX/Z, fY/Z, f)T on 
+the image plane 
+n
+The mapping from Euclidean 3-space to Euclidean 2-space is 
+(by ignoring the third image coordinate) 
+9
+y
+Y
+x
+X
+x
+p
+image plane
+camera
+centre
+Z
+principal axis
+C
+X
+p
+f
+C
+Y
+Z
+f Y / Z
+(X, Y, Z)T !→(f X/Z, f Y/Z)T
+
+Homogeneous coordinates
+n Homogeneous coordinates are a projective geometry representation that extends 
+ordinary (Euclidean) coordinates so that:
+n Translations become linear operations
+n Points at infinity can be represented
+n Perspective projections can be expressed as matrix multiplication
+n Example 
+n Euclidean point: (𝑥!, 𝑦!)
+n Corresponding homogeneous coordinates: (𝑥, 𝑦, 𝑤)
+n Conversions: 𝑥! =
+"
+# , 𝑦! =
+$
+# 
+n Usually 𝑤= 1, so we have: (𝑥, 𝑦) →(𝑥, 𝑦, 1)
+10
+
+Translations and Rotations
+n Translation
+n We want to express the translation of the point 𝑥, 𝑦 to the point 𝑥% = 𝑥+ 𝑡", 𝑦% = 𝑦+ 𝑡$
+n Using homogenous coordinates, we can express the operation as a Matrix multiplication
+𝑥!
+𝑦!
+1
+=
+1
+𝑡"
+1
+𝑡#
+1
+𝑥
+𝑦
+1
+n Rotation
+n We want to express the rotation using rotation matrix 𝑅of the point 𝑥, 𝑦, 𝑧
+𝑥&
+𝑦&
+𝑧&
+1
+= 𝑅
+0
+0
+1
+𝑥
+𝑦
+𝑧
+1
+ 
+11
+
+Pinhole camera model
+n A model of a camera can be built starting from its characteristics
+n Assumptions:
+n The camera center is defined as 𝐶
+n The image plane is located at distance 𝑓 (focal length) from the pinhole
+n We have a camera coordinate system where:
+n The origin is the camera center
+n z axis point forward
+n The image plane is perpendicular to the z axis
+n The 3D world has its origin in 𝑂
+n The projection of the 3D world point is rotated
+using rotation matrix 𝑅 and translated by 𝑡
+12
+X
+Z
+Y
+R, t
+Y
+Xcam
+cam
+O
+C
+Zcam
+
+Pinhole camera model
+n 3D world point in the 3D world reference system &𝑋$ =
+𝑋$
+𝑌$
+𝑍$
+1
+n 3D world point in the camera reference system &𝑋% =
+𝑋&
+𝑌&
+𝑍&
+1
+n The image point *𝑥=
+𝑥
+𝑦
+1
+13
+
+Pinhole camera model
+n The transformation from 3D world coordinates to camera coordinates is 𝑋% = 𝑅𝑋$ + 𝑡 
+that in homogenous coordinates becomes
+&𝑋& = 𝑅
+𝑡
+0
+1
+&𝑋'
+n The image plane is defined by:
+n Focal length in pixels: (𝑓", 𝑓$)
+n Principal point (center of the sensor) in pixels: (𝑐", 𝑐$)
+n The intrinsic calibration matrix conveys the image characteristics
+𝐾=
+𝑓"
+𝑐"
+𝑓#
+𝑐#
+1
+14
+
+Pinhole camera model
+n The projection of the 3D point in the camera reference system on the image plane 
+becomes:
+*𝑥= 𝐾
+𝑋&
+𝑌&
+𝑍&
+n Putting all together, we have:
+𝑥
+𝑦
+1
+=
+𝑓"
+𝑐"
+𝑓#
+𝑐#
+1
+𝑅
+𝑡
+0
+1
+𝑋$
+𝑌$
+𝑍$
+1
+15
+
+Pinhole model
+n The equation is normally written as
+*𝑥= 𝐾𝑅𝑡&𝑋$
+n 𝑃= 𝐾𝑅𝑡 is the pinhole camera model
+n 𝐾 is the intrinsic (internal) camera calibration matrix, that defines the properties of the 
+camera
+n
+𝑅𝑡 is the extrinsic (external) calibration matrix, that defines the location of the camera 
+in the vehicle
+16
+
+Camera distortion
+n The pinhole model is ideal, as it does not consider distortion
+n Radial distortion correction
+n k1 and k2 are the radial distortion parameters
+17
+X
+Y
+Z
+x
+y
+No radial distortion 
+X
+Y
+Z
+x
+y
+Barrel distortion 
+X
+Y
+Z
+x
+y
+Pincushion distortion 
+
+Camera calibration
+n It consists in calculating internal and external parameters for a specific camera, including 
+the distortion parameters
+n The procedure is as follows:
+n Print a pattern and attach it to a planar surface (normally a checkerboard pattern is used)
+n Take a few images of the model plane under different orientations by moving either the plane or the 
+camera 
+n Detect the feature points in the images 
+n Estimate the intrinsic and extrinsic parameters using the closed-form solution as described in the 
+following 
+n Estimate the coefficients of the radial distortion by solving the linear least-squares
+n Refine all parameters, including lens distortion parameters, by minimizing procedure
+18
+
+Closed form solution for parameter estimation
+n Considering a feature point in the world reference frame and the mapped point in the 
+camera reference frame we have:
+𝑠
+𝑢
+𝑣
+1
+= 𝐾𝑅| 𝑡
+𝑋
+𝑌
+𝑍
+1
+n We assume the image is such that Z=0, therefore, setting 𝑅= 𝑟( 𝑟) 𝑟*
+𝑠
+𝑢
+𝑣
+1
+= 𝐾𝑟( 𝑟) 𝑟*| 𝑡
+𝑋
+𝑌
+0
+1
+= 𝜆𝐾𝑟( 𝑟) | 𝑡
+𝑋
+𝑌
+1
+19
+Scaling factor
+Camera reference frame
+world reference frame
+
+Closed form solution for parameter estimation
+n We define 𝜆𝐾𝑟( 𝑟) 𝑡= 𝐻= ℎ( ℎ) ℎ*
+n Then, by knowing that 𝑟( and 𝑟) are orthogonal, we have:
+:
+ℎ(
++𝐾,+𝐾,(ℎ) = 0
+ℎ(
++𝐾,+𝐾,(ℎ( = ℎ)
++𝐾,+𝐾,(ℎ)
+n The equations has 8 degrees of freedom (camera internal + external parameters) 
+n By combining the equations for two independent images, we can computer the camera 
+internal parameters 𝐾
+20
+
+Closed form solution for parameter estimation
+n Once 𝐾 is known, we can compute the rotation matrix as follows:
+𝑟( = 𝜆𝐾,(ℎ(
+𝑟) = 𝜆𝐾,(ℎ)
+𝑟* = 𝑟(𝑟)
+𝑡= 𝜆𝐾,(ℎ*
+n Where 𝜆=
+(
+-'(.( =
+(
+-'(.)
+21
+
+Estimate the coefficients of the radial distortion
+n The radial distortion parameters 𝑘(, 𝑘) can be estimated by solving 2𝑛𝑚 equations, 
+where each ideal pixel position 𝑢, 𝑣 is computed starting from the actual pixel position  
+𝑥, 𝑦, while considering 𝑚 points in 𝑛 images
+22
+!(u−u0)(x2+y2)
+(u−u0)(x2+y2)2
+(v−v0)(x2+y2)
+(v−v0)(x2+y2)2
+" !k1
+k2
+"
+=
+!˘u−u
+˘v−v
+"
+
+Refine all parameters
+n Given 𝑛 images of a model plane and 𝑚 points on the model plane
+n The maximum likelihood estimate of the parameters can be obtained by minimizing the 
+following functional 
+23
+n
+!
+i=1
+m
+!
+j=1
+∥mij −"m(A, Ri, ti, Mj)∥2
+projection of point 𝑀/ in image 𝑖 according to 𝜆𝐾𝑟* 𝑟+ | 𝑡𝑀
+
+Camera calibration in MATLAB
+n Nine test images consisting of checkerboard pattern 
+n 1072x712 pixels
+n 7x10 checkerboard
+n Each square is 29mm wide
+24
+
+Camera calibration in MATLAB
+n Load images and detect checkerboard points, coordinates are in the camera reference 
+plane
+25
+images = imageSet(fullfile(toolboxdir('vision'),'visiondata','calibration','mono'));
+imageFileNames = images.ImageLocation;
+[imagePoints, boardSize] = detectCheckerboardPoints(imageFileNames);
+
+26
+
+Camera calibration in MATLAB
+n Generate checkboard points in the world reference plane
+n Perform calibration
+n This operation will return the internal and external camera parameters
+27
+squareSizeInMM = 29;
+worldPoints = generateCheckerboardPoints(boardSize,squareSizeInMM);
+I = readimage(images,1);
+imageSize = [size(I, 1),size(I, 2)];
+params = estimateCameraParameters(imagePoints,worldPoints,'ImageSize',imageSize);
+
+Representation of external parameters
+28
+
+Parameter estimation error
+n The parameter estimation is an optimization process; therefore, an estimation error is to 
+be expected
+29
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+30
+
+Distortion correction
+n After camera calibration the distortions affecting the image can be removed by applying 
+the radial distortion parameters 
+31
+Original image
+Undistorted image
+
+Distortion correction in MATLAB
+n After camera calibration
+32
+J1 = undistortImage(I,params);
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+33
+
+Perspective transformation
+n The image obtained by the car camera 
+contains a large non-road area, such as 
+sky, trees on roadside, etc. 
+n Processing of the image will increase the 
+computational complexity and reduce the 
+real-time capability
+n The invalid area will interfere the lane 
+information and affect the detection 
+accuracy
+n Only the area shown in the red box is 
+the region of interest (ROI) for lane 
+detection 
+ 
+34
+
+Perspective transformation
+n Due to the imaging perspective effect, 
+the traffic lanes are two non-parallel lines 
+n The inverse perspective transformation 
+eliminates the perspective effect and 
+produces a top view image that is 
+consistent with the actual situation
+n In the resulting top view image, the lane 
+lines are vertical and parallel to each 
+other, which facilitate the identification in 
+subsequent algorithms 
+35
+Original Image
+Bird’s Eye View
+
+Perspective transformation
+n The ROI should be converted into an 
+inverted trapezoidal shape after the 
+transformation
+n The inverse perspective transformation is 
+the process that convert a rectangular 
+into an inverted trapezoidal 
+36
+
+Perspective transformation
+n
+𝑢, 𝑣denotes the ROI coordinate system 
+n
+𝑥, 𝑦denotes the transformed top view coordinate system 
+n The mapping relationship can be expressed as
+𝑃= 𝑄𝑀
+n  Where:
+n  𝑃= 𝑥, 𝑦, 𝑤,
+n 𝑥=
+"!
+#! , 𝑦=
+$!
+#!
+n 𝑄= [𝑢𝑣1]
+n 𝑀=
+𝑎
+𝑑
+𝑔
+𝑏
+𝑒
+ℎ
+𝑐
+𝑓
+1
+, the transformation matrix from the rectangular to the inverted trapezoidal
+37
+
+Perspective transformation in MATLAB
+n Knowing the internal and external 
+camera parameters, we have to:
+n Create a monoCamera sensor object
+n Define the ROI
+n Compute the inverse trapezoidal 
+transformation using the birdsEyeView() 
+operator
+n Finally, we can apply the transformation to 
+the input image
+38
+focalLength = [309.4362 344.2161]; 
+principalPoint = [318.9034 257.5352]; 
+imageSize = [480 640]; 
+camIntrinsics = 
+cameraIntrinsics(focalLength,principalPoint,imageSize);
+height = 2.1798; pitch = 14;
+sensor = monoCamera(camIntrinsics,height,'Pitch',pitch);
+distAhead = 30; 
+spaceToOneSide = 6; 
+bottomOffset = 3; 
+outView = [bottomOffset,distAhead,-
+spaceToOneSide,spaceToOneSide];
+outImageSize = [NaN,250];
+birdsEye = birdsEyeView(sensor,outView,outImageSize);
+I = imread('road.png’);
+BEV = transformImage(birdsEye,I);
+
+Outline
+n Introduction
+n The image pipeline
+n
+Camera calibration
+n
+Distortion correction
+n
+Perspective transformation
+n
+Lane detection
+39
+
+Lane detection
+n It consists in the following steps:
+n Grayscale conversion and noise reduction for lane enhancement
+n Image binarization
+n Extraction of lane characteristics
+40
+
+Grayscale conversion and noise reduction
+n Image is transformed to grayscale to reduce the amount 
+of information to process
+n Random noise disturb the image acquired by the camera
+n It may influence the results of lane detection
+n Gaussian blur is used to remove the noise
+n Low pass filter
+n A Gaussian function is used for calculating the transformation to 
+apply to each pixel in the image
+41
+𝐺𝑥, 𝑦=
+1
+2𝜋𝜎C 𝑒DE!FG!
+CH!
+
+Convolution
+n The Gaussian blur filter is defined by a convolution matrix called kernel
+n The filter is applied using matrix multiplication
+𝑔𝑥, 𝑦= 𝑤K 𝑓𝑥, 𝑦= L
+01,2
+2
+L
+!1,3
+3
+𝑤(𝑠, 𝑡) K 𝑓(𝑥−𝑠, 𝑦−𝑡)
+n w s and t are selected according to a specific goal
+n For the Gaussian blur w is either 3x3 or 5x5
+42
+Filtered image
+Source image
+Kernel
+
+Gaussian blur
+43
+Original image
+𝑤= 1
+16
+1
+2
+1
+2
+4
+2
+1
+2
+1
+𝑤=
+1
+256
+1
+4
+6
+4
+1
+4
+16
+24
+16
+4
+6
+24
+36
+24
+6
+4
+16
+24
+16
+4
+1
+4
+6
+4
+1
+
+Lane enhancement
+n For efficient implementation two separable kernels are used
+44
+𝑔𝑥= 1
+𝜎I
+J 𝑒
+K I!
+JL"! MKI!
+L"!
+𝑔𝑦= 𝑒
+K M
+JL#!N!
+
+Image binarization
+n To distinguish lane lines from background, image is binarized according to the grayscale 
+of the image pixels
+45
+𝑏𝑥, 𝑦= *
+255 ⟹𝑔𝑥, 𝑦≥𝑇ℎ
+0 ⟹𝑔𝑥, 𝑦< 𝑇ℎ
+
+Image binarization
+n The key to binarize an image is how to select the threshold 𝑇ℎ 
+n Since illumination varies under deferent road scenes, it is impossible to distinguish the 
+lane lines from background using a fixed threshold
+n An iterative method is used to determine an optimal threshold to extract lane lines
+n The optimal threshold is capable of adapting to varied illumination 
+46
+
+Image binarization
+n Let set 𝑇ℎ4 = 5-./65-01
+)
+ where 𝑔72" and 𝑔789 are the maximum and minimum gray 
+value within the original image respectively 
+n Then, the image is divided in two regions, 𝐴 and 𝐵 and the average gray value of the two 
+regions is calculated as follows, starting with 𝑖= 0
+n Then, the threshold is updated as 𝑇ℎ86( = 52653
+)
+n The process is repeated until 𝑇ℎ86( = 𝑇ℎ8
+47
+𝑔O =
+∑P(I,N)QRS$ 𝑔(𝑥, 𝑦)
+∑P(I,N)QRS$ 1
+𝑔T =
+∑P I,N URS$ 𝑔(𝑥, 𝑦)
+∑P I,N URS$ 1
+
+Extraction of lane characteristics
+n In the binary image, the pixels corresponding 
+to the line are 255, while the others are 0
+n The pixels in each column of the image are 
+summed and a histogram is built
+n The position of the two peaks represents the 
+position of the lane delimiters
+48
+

@@ -1,0 +1,70 @@
+Assignment 2: Lane detection 
+ 
+Introduction 
+The scope of this assignment is to develop a lane detection algorithm that works with real 
+images from PandaSet data set, available at: 
+ 
+ https://www.kaggle.com/datasets/usharengaraju/pandaset-dataset. 
+ 
+The archive with the images to be used is available at the following link (17.26 GB): 
+ 
+https://www.dropbox.com/scl/fi/sch1t7ns9vfpa22setcfw/archive.zip?rlkey=0sglcvm9l
+9xbzb81zoerkhx0b&dl=0 
+ 
+The camera parameters are as follows: 
+ 
+camera = struct( 
+'ImageSize',[1920 1080],'PrincipalPoint',[970 483],... 
+                'FocalLength',[1970 1970],'Position',[1.8750 0 1.6600],... 
+                'Rotation',[0 0 0] 
+); 
+focalLength = camera.FocalLength; 
+principalPoint = camera.PrincipalPoint; 
+imageSize 
+ = camera.ImageSize; 
+height          
+= camera.Position(3);   
+pitch           
+= camera.Rotation(2);   
+Assignment 
+1. Develop an implementation either using MATLAB or Python 3 of the GOLD lane 
+detection algorithm. 
+2. The code shall receive as input the directory containing the images to be 
+processed (e.g., PandaSetSensorData/archive/008/Camera/front_camera/) 
+3. (mandatory requirement) The code shall process each image in the path, and 
+produce the following output: 
+
+a. The image shall be displayed, and the detected lane delimiter(s) shall be 
+displayed as green vertical line(s) over the bird’s eye view of the input 
+image, as shown below: 
+ 
+b. In case both the lanes are not found, a message shall be written on the 
+bird’s eye view, such as for example “No lanes found”. 
+4. (optional requirement 1) The code shall be able to discriminate between 
+continuous lane delimiters, and dashed lane delimiters. 
+5. (optional requirement 2) The visualization of the lane delimiter shall be 
+performed on the original image instead of the bird’s eye view. 
+6. (optional requirement 3) The algorithm shall recognize the presence of obstacles 
+in the lane and tell the approximate distance. 
+Instructions 
+• The report is individual. 
+• Upload you work as a ZIP ﬁle using Portale della didattica. 
+• The ZIP ﬁle must contain: 
+o A PDF ﬁle with a report describing the algorithm implemented.  
+o MATLAB/Python code you implemented. 
+• The code will be tested against the PandaSet data set front_camera 
+o 
+In case of MATLAB implementation: a variable named search_path shall 
+be used to point to the directory containing the images to be processed, 
+as in the following example: 
+search_path = 'PandaSetSensorData/archive/044/Camera/front_camera/*.jpg'; 
+
+ 
+o In case of Python implementation: the python script shall be named 
+run_gold.py, and the search path of the directory containing the images 
+to be processed shall be provided as argumento on the command line, as 
+in the following example: 
+python3 run_gold 'PandaSetSensorData/archive/044/Camera/front_camera/*.jpg 
+ 
+• The deadline for delivering the assignment is: April 21st, 2026 at 11:30. 
+
