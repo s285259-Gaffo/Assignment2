@@ -177,6 +177,16 @@ def detect_lanes_gold(bev_image):
             iterations=1
         ).reshape(-1) > 0
         thresh[crosswalk_rows, :] = 0
+
+    # FILTRO ORIZZONTALE AGGIUNTIVO:
+    # Estrae blocchi prevalentemente orizzontali (tipici delle zebrature) e li rimuove.
+    # Le lane verticali vere non sopravvivono a questo kernel orizzontale lungo.
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 5))
+    horizontal_mask = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_kernel)
+    if np.count_nonzero(horizontal_mask) > 0:
+        # Dilatazione lieve per togliere anche i bordi delle strisce pedonali.
+        horizontal_mask = cv2.dilate(horizontal_mask, np.ones((5, 5), np.uint8), iterations=1)
+        thresh = cv2.bitwise_and(thresh, cv2.bitwise_not(horizontal_mask))
     
     # 4. Istogramma per trovare le linee: sommiamo le colonne
     # Usiamo solo la parte ALTA/MEDIA della BEV per evitare che i bordi verticali

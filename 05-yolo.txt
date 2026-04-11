@@ -1,0 +1,172 @@
+Object detection
+Massimo Violante
+Politecnico di Torino
+Dip. Automatica e Informatica
+Outline
+n Introduction
+n Problem formulation
+n YOLO algorithm
+n YOLO training
+n YOLO with MATLAB
+2
+Outline
+n Introduction
+n Problem formulation
+n YOLO algorithm
+n YOLO training
+n YOLO with MATLAB
+3
+Introduction
+n Object detection is the problem 
+of both locating AND classifying 
+objects
+n YOLO: You Only Look Once 
+(YOLO), is an algorithm for 
+Unified, Real-Time Object 
+Detection
+n Goal of YOLO algorithm is to do 
+object detection both fast AND 
+with high accuracy
+4
+Object Detection vs Classification
+Importance of camera-based object detection
+n Humans are able to detect objects 
+and do perception using just visual 
+modality in real time (not needing 
+radar)
+n If we want responsive autonomous 
+vehicle systems that work in real 
+time without specialized sensors 
+almost real time vision-based 
+object detection can help greatly
+5
+Vision based vs LIDAR (self driving)
+Outline
+n Introduction
+n Problem formulation
+n YOLO algorithm
+n YOLO training
+n YOLO with MATLAB
+6
+Problem formulation
+n Given an image generate bounding 
+boxes, one for each detectable object in 
+image
+n For each bounding box, output 5 
+predictions: x, y, w, h, confidence. Also 
+output class
+n x, y (coordinates for center of bounding box)
+n w,h (width and height)
+n confidence (probability bounding box has 
+object)
+n class (classification of object in bounding 
+box)
+7
+Outline
+n Introduction
+n Problem formulation
+n YOLO algorithm
+n YOLO training
+n YOLO with MATLAB
+8
+YOLO algorithm
+n A single neural network for localization 
+and for classification (less complicated 
+pipeline)
+n Need to inference only once (efficient 
+computation)
+n Looks at the entire image each time 
+leading to less false positives (has 
+contextual information for detection)
+n YOLO operations:
+n Image is split into a SxS grid
+n For each grid square, generate B bounding 
+boxes
+n For each bounding box, provide 5 predictions: 
+x, y, w, h, confidence
+9
+YOLO algorithm
+n YOLO is a regression algorithm
+n Given:
+n Input feature 𝑥∈𝑅!
+n Target variable  𝑦∈𝑅
+n A regression algorithm learns a function 𝑓𝑥≈𝑦that
+approximates a mapping from inputs to a real-valued
+output
+n In the case of YOLO:
+n Input feature 𝑥is and image W (width) x H (heigth) x RGB, for 
+example 448x448x3
+n Target variable 𝑦is a tensor of size 𝑆"(𝐵∗5 + 𝐶)
+n 𝑆! is the grid used to divide the image
+n (𝐵∗5 + 𝐶) are the predictions for each bounding boxes in each
+cell of the grid, and the classes
+10
+Output tensor for B=2 and C=2
+Example
+11
+Ground Truth (GT)
+YOLO architecture
+12
+Input 
+(image 448x448x3)
+S=7, B=2, C=20            Output size is 7x7x(5x2+20)=7x7x30
+Implementation uses 7 convolution layers
+Convolution layers
+n A convolutional layer is the building block of a Convolutional Neural Network (CNN)
+n It extracts spatial features from input data by applying learnable filters
+n A convolutional layer:
+n Uses small filters (kernels), K 
+n Slides them across the input
+n Produces feature maps
+n For an input image 𝑋and a filter 𝐾, the convolution computes the output feature map 𝑌:
+𝑌𝑖, 𝑗= ,
+)
+,
+*
+𝑋(𝑖+ 𝑚, 𝑗+ 𝑛) 2 𝐾(𝑚, 𝑛)
+13
+Outline
+n Introduction
+n Problem formulation
+n YOLO algorithm
+n YOLO training
+n YOLO with MATLAB
+14
+YOLO training
+n Given a set of images as GT, a loss function shall be minimized
+𝐿= 𝜆+,,-. 2 𝐿/,+ + 𝐿+,*0 + 𝐿+/1 
+15
+Localization loss, associated to 
+identification of bounding boxes 
+Weight to emphasizes localization
+Confidence loss
+Classification loss
+Localization loss
+n It measures how well the predicted box matches the ground truth
+𝐿/,+ = ,(𝑥−6𝑥)2+(𝑦−6𝑦)2+( 𝑤−
+8𝑤)2+( ℎ−
+:ℎ)2
+n Where:
+n (𝑥, 𝑦): center of the bounding box
+n (𝑤, ℎ): width and height of the bounding box
+16
+Confidence loss/Classification loss
+n Confidence loss measures whether a box actually contains an object
+𝐿+,*0 = ,(𝐶−<𝐶)2
+n Where:
+n 𝐶: probability of an object, 0 if no object is present in the bounding box
+n Classification loss evaluates how well the model predicts the correct class
+𝐿+/1 = ,(𝑝(𝑐) −̂𝑝(𝑐))2
+17
+Outline
+n Introduction
+n Problem formulation
+n YOLO algorithm
+n YOLO training
+n YOLO with MATLAB
+18
+YOLO in MATLAB
+n Refer to the following URL to test YOLO training and inference in MATLAB 
+https://it.mathworks.com/help/vision/ug/object-detection-using-yolov4-deep-learning.html
+openExample('deeplearning_shared/ObjectDetectionUsingYOLOV4DeepLearningExample')
+19
