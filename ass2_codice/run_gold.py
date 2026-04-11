@@ -330,160 +330,139 @@ def detect_lanes_gold(bev_image):
         
     return lanes, thresh
 
-def detect_obstacles(bev_gray, lanes):
+import urllib.request
+import os
+
+# YOLO CONFIGURATION
+YOLO_CFG = "yolov3-tiny.cfg"
+YOLO_WEIGHTS = "yolov3-tiny.weights"
+
+def load_yolo():
+    """Carica il modello YOLOv3-tiny. Scarica i pesi se non presenti."""
+    if not os.path.exists(YOLO_CFG):
+        print("Scaricamento yolov3-tiny.cfg...")
+        req = urllib.request.Request("https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3-tiny.cfg", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(YOLO_CFG, 'wb') as out_file:
+            out_file.write(response.read())
+    if not os.path.exists(YOLO_WEIGHTS):
+        print("Scaricamento yolov3-tiny.weights (potrebbe richiedere qualche secondo)...")
+        req = urllib.request.Request("https://pjreddie.com/media/files/yolov3-tiny.weights", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(YOLO_WEIGHTS, 'wb') as out_file:
+            out_file.write(response.read())
+    
+    net = cv2.dnn.readNetFromDarknet(YOLO_CFG, YOLO_WEIGHTS)
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    return net
+
+# Caricamento del modello YOLO globale per efficienza
+print("Inizializzazione modello YOLO...")
+YOLO_NET = load_yolo()
+YOLO_CLASSES = {0: 'pedestrian', 1: 'bicycle', 2: 'car', 3: 'motorbike', 5: 'bus', 7: 'truck'}
+print("YOLO pronto.")
+
+def detect_obstacles(frame):
     """
-    Rileva ostacoli (es. un'auto, pedoni) rigorosamente all'interno della corsia di marcia.
-    Il corridoio di analisi è fisso e centrato per guardare solo cosa succede "davanti al muso".
+    Rileva ostacoli (es. auto, pedoni) utilizzando YOLO (You Only Look Once) 
+    sull'estrazione delle bounding boxes (x, y, w, h) per come spiegato nelle slide della Professoressa.
+    Applica poi la conversione matematica per trovare la profondità/distanza sull'asse Z.
     """
-    # ZONA DI COLLISIONE FISSA (Basata sulla geometria della corsia centrale)
-    # BEV width = 800px. Le linee sono circa a 200 e 600.
-    # Il corridoio di "pericolo immediato" è tra 320 e 480 pixel.
-    # Restretto ulteriormente per guardare in modo molto mirato davanti 
-    # ed evitare l'auto nera che si stringe dalla corsia a destra.
-    left_x = 320
-    right_x = 480
+    h_frame, w_frame = frame.shape[:2]
     
-    corridor_width = right_x - left_x
-    # Analizziamo solo questa fetta centrale della BEV
-    corridor = bev_gray[:, left_x: right_x]
+    # 1. Conversione dell'immagine in un blob per passarla alla rete neurale convoluzionale
+    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
+    YOLO_NET.setInput(blob)
     
-    # Maschera ostacoli: cerchiamo anomalie rispetto al colore dell'asfalto centrale
-    blur_corridor = cv2.GaussianBlur(corridor, (5, 5), 0)
-    edges = cv2.Canny(blur_corridor, 50, 150)
-
-    # Mediana della riga per trovare oggetti che "staccano" dal grigio stradale
-    row_median = np.median(blur_corridor, axis=1, keepdims=True)
-    photometric_anomaly = (np.abs(blur_corridor.astype(np.int16) - row_median.astype(np.int16)) > 25).astype(np.uint8) * 255
-
-    combined_mask = cv2.bitwise_or(edges, photometric_anomaly)
+    # Nomi dei livelli di output
+    layer_names = YOLO_NET.getLayerNames()
+    output_layers = [layer_names[i - 1] for i in YOLO_NET.getUnconnectedOutLayers()]
     
-    # Pulizia morfologica per unire i pezzi dell'ostacolo
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+    # 2. Forward pass: estraiamo le previsioni del modello (tensori)
+    layer_outputs = YOLO_NET.forward(output_layers)
     
-    # Sopprimiamo rumore orizzontale (es. giunzioni asfalto)
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 20))
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, vertical_kernel)
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(combined_mask)
-
-    obstacle_y = None
-    obstacle_x = None
-    obstacle_center_y = None
-    best_bottom = -1
-    # Un ostacolo deve avere una dimensione minima per non essere un sasso o un'ombra
-    min_area = 400 
-
-    for lbl in range(1, num_labels):
-        x = stats[lbl, cv2.CC_STAT_LEFT]
-        y = stats[lbl, cv2.CC_STAT_TOP]
-        w = stats[lbl, cv2.CC_STAT_WIDTH]
-        h = stats[lbl, cv2.CC_STAT_HEIGHT]
-        area = stats[lbl, cv2.CC_STAT_AREA]
-
-        if area < min_area or w < 30 or h < 30:
-            continue
-
-        # Scarta oggetti troppo slanciati che potrebbero essere pali o residui di lane marking
-        if h > 4 * w:
-            continue
-
-        bottom = y + h
-        # Prendiamo l'ostacolo più vicino (quello con la base più in basso nella BEV)
-        if bottom > best_bottom:
-            best_bottom = bottom
-            obstacle_x = x + (w // 2)
-            obstacle_center_y = y + (h // 2) # IL CENTRO DELL'OSTACOLO, IN ALTO RISPETTO ALLE RUOTE
-
-    if best_bottom > 0:
-        obstacle_y = int(min(BEV_SIZE[1] - 1, best_bottom))
+    boxes = []
+    confidences = []
+    class_ids = []
+    
+    # 3. Estrazione Bounding Box (x, y, w, h) e Confidence (C) come descritto nelle slide (Formulazione 5 predizioni)
+    for output in layer_outputs:
+        for detection in output:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
             
-    if obstacle_y is not None:
-        # Calcolo distanza (lineare nella BEV: Y=800 -> 6.0m, Y=0 -> 25.0m)
-        z_far = 25.0
-        z_near = 6.0
-        distance = z_far - (obstacle_y / float(BEV_SIZE[1])) * (z_far - z_near)
-        
-        # Riportiamo X al sistema BEV globale
-        obstacle_x_bev = left_x + obstacle_x
-        return obstacle_x_bev, obstacle_y, distance, obstacle_center_y
-        
-    return None, None, None, None
+            # Filtriamo in base alle classi che ci interessano (veicoli e pedoni) e probabilità > 30%
+            if confidence > 0.3 and class_id in YOLO_CLASSES:
+                # Coordinate YOLO restituite come percentuali rispetto all'immagine
+                center_x = int(detection[0] * w_frame)
+                center_y = int(detection[1] * h_frame)
+                w = int(detection[2] * w_frame)
+                h = int(detection[3] * h_frame)
+                
+                # Ricaviamo x, y top-left
+                x = int(center_x - w / 2)
+                y = int(center_y - h / 2)
+                
+                boxes.append([x, y, w, h])
+                confidences.append(float(confidence))
+                class_ids.append(class_id)
+                
+    # 4. Applichiamo Non-Maximum Suppression (NMS) per rimuovere i bounding box ridondanti sullo stesso oggetto
+    indices = cv2.dnn.NMSBoxes(boxes, confidences, score_threshold=0.3, nms_threshold=0.4)
     
-    # Maschera ostacoli robusta: combiniamo bordi + anomalia fotometrica rispetto alla riga stradale.
-    # Questo riduce i falsi positivi su crepe sottili e recupera pedoni/auto in BEV distorta.
-    blur_corridor = cv2.GaussianBlur(corridor, (5, 5), 0)
-    edges = cv2.Canny(blur_corridor, 40, 120)
-
-    row_median = np.median(blur_corridor, axis=1, keepdims=True)
-    photometric_anomaly = (np.abs(blur_corridor.astype(np.int16) - row_median.astype(np.int16)) > 18).astype(np.uint8) * 255
-
-    combined_mask = cv2.bitwise_or(edges, photometric_anomaly)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-
-    # Sopprimiamo bande orizzontali (es. strisce pedonali) mantenendo strutture verticali.
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, vertical_kernel)
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(combined_mask)
-
-    obstacle_y = None
-    obstacle_x = None
-    best_bottom = -1
-    min_area = int(corridor_width * 8)
-    min_w = int(corridor_width * 0.12)
-    min_h = 35
-
-    for lbl in range(1, num_labels):
-        x = stats[lbl, cv2.CC_STAT_LEFT]
-        y = stats[lbl, cv2.CC_STAT_TOP]
-        w = stats[lbl, cv2.CC_STAT_WIDTH]
-        h = stats[lbl, cv2.CC_STAT_HEIGHT]
-        area = stats[lbl, cv2.CC_STAT_AREA]
-
-        # Filtri geometrici anti-falsi positivi: ignoriamo segni sottili dell'asfalto.
-        if area < min_area:
-            continue
-        if w < min_w:
-            continue
-        if h < min_h:
-            continue
-
-        # Scarta pattern da linea: blob troppo slanciato verticalmente.
-        if h > 3 * w:
-            continue
-
-        # Scarta componenti troppo "piatte": tipico pattern di strisce orizzontali a terra.
-        if w > int(corridor_width * 0.75) and h < int(corridor_width * 0.18):
-            continue
-
-        # Scarta blob troppo vicino alle x delle linee rilevate (tipico falso positivo su lane marking).
-        center_x_bev = int(left_x + 30 + x + (w // 2))
-        if any(abs(center_x_bev - lx) < 50 for lx in lane_x_positions):
-            continue
-
-        bottom = y + h
-        if bottom > best_bottom:
-            best_bottom = bottom
-            obstacle_x = x + (w // 2)
-
-    if best_bottom > 0:
-        obstacle_y = int(min(BEV_SIZE[1] - 1, best_bottom))
+    results = []
+    if len(indices) > 0:
+        for i in indices.flatten():
+            x, y, w, h = boxes[i]
             
-    if obstacle_y is not None:
-        # Calcolo distanza. 
-        # BEV mappa Y=800 a 6.0m e Y=0 a 25.0m (come definito in get_ipm_matrix)
-        z_far = 25.0
-        z_near = 6.0
-        # Proporzione lineare nella BEV!
-        distance = z_far - (obstacle_y / float(BEV_SIZE[1])) * (z_far - z_near)
-        # Convertiamo x dal sistema del corridoio al sistema BEV completo.
-        obstacle_x_bev = int(left_x + 30 + obstacle_x) if obstacle_x is not None else BEV_SIZE[0] // 2
-        return obstacle_x_bev, obstacle_y, distance
+            # Formule di Distanza in Z (Ground Plane Projection)
+            # Dalla formula della prospettiva: v = fy * (Y / Z) + cy
+            # Pertanto: Z = fy * Y / (v - cy), dove v è il pixel in basso, Y è l'altezza della telecamera
+            v_bottom = y + h
+            cx, cy = PRINCIPAL_POINT
+            fx, fy = FOCAL_LENGTH
+            
+            distance = -1
+            # Valutiamo la distanza solo se l'auto tocca l'asfalto sotto la linea dell'orizzonte (cy)
+            if v_bottom > cy:
+                distance = fy * CAMERA_POSITION_Z / float(v_bottom - cy)
+            
+            results.append({
+                'class_name': YOLO_CLASSES[class_ids[i]],
+                'confidence': confidences[i],
+                'box': (x, y, w, h),
+                'distance': distance
+            })
+            
+    return results
+
+def draw_yolo_obstacles(frame, obstacles):
+    """
+    Disegna i bounding box di YOLO e la distanza calcolata sul frame originale.
+    """
+    frame_out = frame.copy()
+    for obs in obstacles:
+        x, y, w, h = obs['box']
+        dist = obs['distance']
         
-    return None, None, None
+        # Gestione visualizzazione info
+        label = f"{obs['class_name']} {obs['confidence']:.2f}"
+        dist_label = f"{dist:.1f}m" if dist > 0 else "N/A"
+        text = f"{label} | {dist_label}"
+        
+        # Colore identificativo (rosso)
+        color = (0, 0, 255)
+        
+        # Disegna il rettangolo
+        cv2.rectangle(frame_out, (x, y), (x + w, y + h), color, 2)
+        
+        # Sfondo per il testo
+        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        cv2.rectangle(frame_out, (x, y - 25), (x + text_size[0], y), color, -1)
+        # Testo
+        cv2.putText(frame_out, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+    return frame_out
 
 def draw_lanes_on_original(frame, lanes, inv_matrix):
     """
@@ -576,23 +555,18 @@ def main():
                 else:
                     cv2.line(bev, (x, 0), (x, BEV_SIZE[1]), c, 4)
                 
-        # Opt 3: Ostacoli (sempre attivo! Sia con, sia senza corsie visibili)
-        obstacle_x, obstacle_y, distance, obstacle_center_y = detect_obstacles(bev_gray, detected_lanes)
-        if obstacle_y is not None:
-            cv2.line(bev, (0, obstacle_y), (BEV_SIZE[0], obstacle_y), (0, 0, 255), 3)
-            cv2.putText(bev, f"Ostacolo: {distance:.1f} m", (50, obstacle_y - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-
-            # Usiamo il centro del blob ostacolo rilevato per proiezione precisa del PALLINO ROSSO.
-            # ATTENZIONE: per la Y usiamo obstacle_center_y invece di obstacle_y (che è rimasto per la distanza)
-            pt_bev = np.array([[[obstacle_x, obstacle_center_y]]], dtype=np.float32)
-            pt_orig = cv2.perspectiveTransform(pt_bev, INV_IPM_MATRIX)
-            ou, ov = int(pt_orig[0][0][0]), int(pt_orig[0][0][1])
-
-            # Testo di allarme sul frame (alto a sinistra) spostanto un po in basso
-            cv2.putText(frame_lanes, f"WARNING: OSTACOLO A {distance:.1f}m!", 
-                        (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
-            cv2.circle(frame_lanes, (ou, ov), 20, (0, 0, 255), -1)
+        # Opt 3: Ostacoli con YOLO (Logica delle slide)
+        detected_obstacles = detect_obstacles(frame)
+        if detected_obstacles:
+            # Disegniamo i bounding box e le info a schermo
+            frame_lanes = draw_yolo_obstacles(frame_lanes, detected_obstacles)
+            
+            # Troviamo l'ostacolo più vicino (pericolo imminente)
+            valid_distances = [obs['distance'] for obs in detected_obstacles if obs['distance'] > 0]
+            if valid_distances:
+                min_distance = min(valid_distances)
+                cv2.putText(frame_lanes, f"WARNING: OSTACOLO A {min_distance:.1f}m!", 
+                            (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
                 
         # Per visualizzare meglio ridimensioniamo
         frame_resized = cv2.resize(frame_lanes, (960, 540))
