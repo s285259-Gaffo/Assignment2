@@ -9,7 +9,6 @@ IMAGE_SIZE = (1920, 1080) # (width, height)
 PRINCIPAL_POINT = (970, 483) # (cx, cy)
 FOCAL_LENGTH = (1970, 1970) # (fx, fy)
 CAMERA_POSITION_Z = 1.6600 # Altezza della camera dal suolo (metri)
-PITCH = 0 # Radianti
 
 def get_ipm_matrix():
     """
@@ -19,7 +18,7 @@ def get_ipm_matrix():
     """
     # Definiamo i confini dell'area da guardare sulla strada (in metri rispetto alla telecamera)
     z_far = 25.0   # Riduciamo la profondità a 25 metri per evitare distorsioni e orizzonte
-    z_near = 6.0   # Partiamo a guardare da 6 metri dal muso dell'auto
+    z_near = 4.0   # Partiamo a guardare da 4 metri dal muso dell'auto
     x_width = 2.5  # Guardiamo -2.5m a sx e +2.5m a dx (5 metri totali)
 
     # Formula della prospettiva:
@@ -67,7 +66,7 @@ def get_ipm_matrix():
 
 # Calcoliamo la matrice una volta sola, insieme alla sua inversa
 IPM_MATRIX, BEV_SIZE = get_ipm_matrix()
-INV_IPM_MATRIX = np.linalg.inv(IPM_MATRIX)
+_, INV_IPM_MATRIX = cv2.invert(IPM_MATRIX)
 
 def apply_ipm(image):
     return cv2.warpPerspective(image, IPM_MATRIX, BEV_SIZE, flags=cv2.INTER_LINEAR)
@@ -303,7 +302,7 @@ def detect_lanes_gold(bev_image):
     # l'altra continua era "troppo forte", così gli permettiamo di sopravvivere!
     if len(lanes) == 2:
         s0, s1 = lanes[0]['score'], lanes[1]['score']
-        if min(s0, s1) < 0.04 * max(s0, s1):            # [] DA MODIFICARE A 0.05 OPPURE ABBASSARE SE NON RILEVA LINEE
+        if min(s0, s1) < 0.10 * max(s0, s1):            # [] DA MODIFICARE A 0.05 OPPURE ABBASSARE SE NON RILEVA LINEE
             keep_idx = 0 if s0 >= s1 else 1
             lanes = [lanes[keep_idx]]
 
@@ -606,6 +605,8 @@ def main():
                 cv2.putText(frame_lanes, f"WARNING: OSTACOLO A {min_distance:.1f}m!", 
                             (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
                 
+        print(f"[{os.path.basename(img_path)}] Lanes: {len(detected_lanes)} | Obstacles: {len(ego_obstacles)}")
+
         # Per visualizzare meglio ridimensioniamo
         frame_resized = cv2.resize(frame_lanes, (960, 540))
         bev_resized = cv2.resize(bev, (540, 540)) # Facciamo in modo che entrino bene su schermi bassi
