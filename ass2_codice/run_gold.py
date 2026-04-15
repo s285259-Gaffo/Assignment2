@@ -557,12 +557,50 @@ def main():
                 
         # Opt 3: Ostacoli con YOLO (Logica delle slide)
         detected_obstacles = detect_obstacles(frame)
+        
+        # Filtriamo solo gli ostacoli "davanti a noi" (nella nostra corsia)
+        # mappando il centro-base del bounding box nella Bird's Eye View.
+        ego_obstacles = []
         if detected_obstacles:
-            # Disegniamo i bounding box e le info a schermo
-            frame_lanes = draw_yolo_obstacles(frame_lanes, detected_obstacles)
+            # Calcoliamo i limiti della nostra corsia nella BEV
+            # Di default consideriamo un corridoio centrale (da 200 a 600 in una BEV da 800)
+            left_bound = 200
+            right_bound = 600
+            if len(detected_lanes) == 2:
+                left_bound = min(detected_lanes[0]['x'], detected_lanes[1]['x'])
+                right_bound = max(detected_lanes[0]['x'], detected_lanes[1]['x'])
+            elif len(detected_lanes) == 1:
+                lx = detected_lanes[0]['x']
+                if lx < 400: # Linea sinistra trovata
+                    left_bound = lx
+                    right_bound = lx + 350
+                else:        # Linea destra trovata
+                    right_bound = lx
+                    left_bound = lx - 350
+                    
+            # Aggiungiamo un margine di tolleranza
+            left_bound -= 40
+            right_bound += 40
+
+            for obs in detected_obstacles:
+                if obs['distance'] > 0: # Saltiamo ostacoli messi sopra l'orizzonte
+                    x, y, w, h = obs['box']
+                    u_center = x + w / 2.0
+                    v_bottom = y + h
+                    # Proiettiamo il punto (u, v) nella BEV per trovare la posizione (X, Y) reale sulla strada
+                    pts = np.array([[[u_center, float(v_bottom)]]], dtype=np.float32)
+                    bev_pts = cv2.perspectiveTransform(pts, IPM_MATRIX)
+                    bev_x = bev_pts[0][0][0]
+                    
+                    if left_bound <= bev_x <= right_bound:
+                        ego_obstacles.append(obs)
+
+        if ego_obstacles:
+            # Disegniamo i bounding box e le info a schermo solo per gli ostacoli davanti a noi
+            frame_lanes = draw_yolo_obstacles(frame_lanes, ego_obstacles)
             
             # Troviamo l'ostacolo più vicino (pericolo imminente)
-            valid_distances = [obs['distance'] for obs in detected_obstacles if obs['distance'] > 0]
+            valid_distances = [obs['distance'] for obs in ego_obstacles if obs['distance'] > 0]
             if valid_distances:
                 min_distance = min(valid_distances)
                 cv2.putText(frame_lanes, f"WARNING: OSTACOLO A {min_distance:.1f}m!", 
