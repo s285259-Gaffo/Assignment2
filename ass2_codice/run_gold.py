@@ -433,7 +433,50 @@ def detect_obstacles(frame):
                 'distance': distance
             })
             
-    return results
+    # FUSIONE DEI BOUNDING BOX MULTIPLI SULLO STESSO OSTACOLO
+    # Risolve il problema del "cerchione" o della "targa" rilevata come auto separata
+    # Quando l'Intersection over Minimum Area (IoA) è alta (> 60%), YOLO ha rilevato un pezzo dell'auto e l'auto intera.
+    merged_results = []
+    for r in results:
+        x, y, w, h = r['box']
+        area_r = w * h
+        is_merged = False
+        
+        for mr in merged_results:
+            mx, my, mw, mh = mr['box']
+            area_m = mw * mh
+            
+            # Calcolo dell'intersezione
+            ix = max(x, mx)
+            iy = max(y, my)
+            iw = min(x + w, mx + mw) - ix
+            ih = min(y + h, my + mh) - iy
+            
+            if iw > 0 and ih > 0:
+                inter_area = iw * ih
+                # Calcola l'overlap basato sull'area PIÙ PICCOLA (IoA) anziché l'Unione (IoU)
+                if inter_area / min(area_r, area_m) > 0.6:
+                    # Fonde i due rettangoli (prendendo i bordi più estremi)
+                    new_x = min(x, mx)
+                    new_y = min(y, my)
+                    new_w = max(x + w, mx + mw) - new_x
+                    new_h = max(y + h, my + mh) - new_y
+                    
+                    mr['box'] = (new_x, new_y, new_w, new_h)
+                    
+                    # Ricalcola la distanza sul bounding box fuso
+                    v_bottom_new = new_y + new_h
+                    if v_bottom_new > cy:
+                        mr['distance'] = fy * CAMERA_POSITION_Z / float(v_bottom_new - cy)
+                    
+                    mr['confidence'] = max(r['confidence'], mr['confidence'])
+                    is_merged = True
+                    break
+        
+        if not is_merged:
+            merged_results.append(r)
+            
+    return merged_results
 
 def draw_yolo_obstacles(frame, obstacles):
     """
@@ -577,13 +620,16 @@ def main():
                     right_bound = lx
                     left_bound = lx - 350
                     
-            # Aggiungiamo un margine di tolleranza
-            left_bound -= 40
-            right_bound += 40
+            # Manteniamo un margine bassissimo o nullo: le auto in corsia stanno centrali (CIPV).
+            # Evitiamo di allargare troppo altrimenti includiamo auto della corsia a fianco
+            # (soprattutto in curva o per colpa del bounding box largo dovuto alla prospettiva).
+            left_bound -= 0
+            right_bound += 0
 
             for obs in detected_obstacles:
                 if obs['distance'] > 0: # Saltiamo ostacoli messi sopra l'orizzonte
                     x, y, w, h = obs['box']
+                    # Usiamo il centro in basso del bounding box
                     u_center = x + w / 2.0
                     v_bottom = y + h
                     # Proiettiamo il punto (u, v) nella BEV per trovare la posizione (X, Y) reale sulla strada
@@ -591,19 +637,22 @@ def main():
                     bev_pts = cv2.perspectiveTransform(pts, IPM_MATRIX)
                     bev_x = bev_pts[0][0][0]
                     
+                    # Verifichiamo che il centroide appartenga *strettamente* alla nostra corsia
                     if left_bound <= bev_x <= right_bound:
                         ego_obstacles.append(obs)
 
         if ego_obstacles:
-            # Disegniamo i bounding box e le info a schermo solo per gli ostacoli davanti a noi
-            frame_lanes = draw_yolo_obstacles(frame_lanes, ego_obstacles)
+            # Troviamo l'ostacolo EGO più vicino (Closest In-Path Vehicle - CIPV)
+            # Solo lui è il nostro vero ostacolo primario.
+            closest_obs = min(ego_obstacles, key=lambda o: o['distance'])
             
-            # Troviamo l'ostacolo più vicino (pericolo imminente)
-            valid_distances = [obs['distance'] for obs in ego_obstacles if obs['distance'] > 0]
-            if valid_distances:
-                min_distance = min(valid_distances)
-                cv2.putText(frame_lanes, f"WARNING: OSTACOLO A {min_distance:.1f}m!", 
-                            (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
+            # Disegniamo i bounding box e le info a schermo SOLO per l'ostacolo più vicino (CIPV)
+            frame_lanes = draw_yolo_obstacles(frame_lanes, [closest_obs])
+            
+            # Stampa l'allarme
+            min_distance = closest_obs['distance']
+            cv2.putText(frame_lanes, f"WARNING: OSTACOLO A {min_distance:.1f}m!", 
+                        (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
                 
         print(f"[{os.path.basename(img_path)}] Lanes: {len(detected_lanes)} | Obstacles: {len(ego_obstacles)}")
 
