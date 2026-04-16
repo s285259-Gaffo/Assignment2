@@ -188,10 +188,10 @@ def detect_lanes_gold(bev_image):
         thresh = cv2.bitwise_and(thresh, cv2.bitwise_not(horizontal_mask))
     
     # 4. Istogramma per trovare le linee: sommiamo le colonne
-    # Usiamo solo la parte ALTA/MEDIA della BEV per evitare che i bordi verticali
-    # dell'auto davanti (molto vicina) vengano presi come linee corsia.
-    histogram_h = int(0.72 * BEV_SIZE[1])
-    raw_histogram = np.sum(thresh[:histogram_h, :] // 255, axis=0)
+    # Usiamo solo la parte BASSA della BEV per ottenere l'allineamento
+    # più preciso vicino al veicolo (dove l'IPM è meno distorto)
+    start_h = int(0.60 * BEV_SIZE[1])
+    raw_histogram = np.sum(thresh[start_h:, :] // 255, axis=0)
     
     # Tagliamo via i margini estremi molto meno!
     # L'auto davanti a noi ci costringe ad avere linee molto laterali.
@@ -322,15 +322,58 @@ def detect_lanes_gold(bev_image):
                 else:
                     lanes = [lanes[1]]
 
-    # Ripulisci campi di debug non necessari.
+    global line_history
+    
+    # Ripulisci campi di debug non necessari e aggiorna memoria
+    current_frame_lanes = []
     for lane in lanes:
         lane.pop('score', None)
         lane.pop('ratio', None)
+        current_frame_lanes.append(lane)
         
-    return lanes, thresh
+    line_history.append(current_frame_lanes)
+    if len(line_history) > 4:  # Manteniamo la memoria di 4 frame
+        line_history.pop(0)
+
+    # Se non troviamo linee nel frame corrente o ne troviamo una e prima ne avevamo 2, 
+    # proviamo a recuperarle dalla memoria
+    best_lanes = current_frame_lanes
+    if len(current_frame_lanes) < 2 and len(line_history) > 1:
+        # Contiamo quante linee avevamo storicamente (in media nei frame precedenti)
+        storico_sx = []
+        storico_dx = []
+        for memory_lanes in line_history[:-1]:
+            for l in memory_lanes:
+                if l['x'] < midpoint:
+                    storico_sx.append(l)
+                else:
+                    storico_dx.append(l)
+                    
+        # Se abbiamo perso una linea, controlliamo se possiamo ripristinarla dalla storia
+        has_left = any(l['x'] < midpoint for l in current_frame_lanes)
+        has_right = any(l['x'] >= midpoint for l in current_frame_lanes)
+        
+        recovered_lanes = list(current_frame_lanes)
+        
+        # Recuperiamo la sinistra
+        if not has_left and len(storico_sx) >= 2: # Se la vedevamo regolarmente prima
+            recovered_left = max(storico_sx, key=lambda l: l.get('score', 1)) # Oppure prendiamo l'ultima
+            recovered_lanes.append({'x': recovered_left['x'], 'type': recovered_left['type']})
+            
+        # Recuperiamo la destra
+        if not has_right and len(storico_dx) >= 2:
+            recovered_right = max(storico_dx, key=lambda l: l.get('score', 1))
+            recovered_lanes.append({'x': recovered_right['x'], 'type': recovered_right['type']})
+            
+        best_lanes = recovered_lanes
+        
+    return best_lanes, thresh
 
 import urllib.request
 import os
+
+# Memoria per le detection passate
+line_history = []
 
 # YOLO CONFIGURATION
 YOLO_CFG = "yolov3-tiny.cfg"
