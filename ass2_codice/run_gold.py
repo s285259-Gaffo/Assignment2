@@ -1,6 +1,7 @@
 ﻿#!/usr/bin/env python3
 """
-Assignment 2 - GOLD Lane Detection Algorithm + YOLO Obstacles + Sliding Window Tracking
+Assignment 2 - GOLD Lane Detection + YOLO (IoA Merged & CIPV) + Sliding Window Tracking
+Con Filtri Anti-Zebrature e Sanity Check Larghezza Corsia
 """
 
 import cv2
@@ -56,14 +57,10 @@ def get_ipm_matrix():
     fx, fy = FOCAL_LENGTH
     h = CAMERA_POSITION_Z
 
-    u_tl = fx * (-x_width / z_far) + cx
-    v_tl = fy * (h / z_far) + cy
-    u_tr = fx * (x_width / z_far) + cx
-    v_tr = fy * (h / z_far) + cy
-    u_br = fx * (x_width / z_near) + cx
-    v_br = fy * (h / z_near) + cy
-    u_bl = fx * (-x_width / z_near) + cx
-    v_bl = fy * (h / z_near) + cy
+    u_tl = fx * (-x_width / z_far) + cx; v_tl = fy * (h / z_far) + cy
+    u_tr = fx * (x_width / z_far) + cx;  v_tr = fy * (h / z_far) + cy
+    u_br = fx * (x_width / z_near) + cx; v_br = fy * (h / z_near) + cy
+    u_bl = fx * (-x_width / z_near) + cx; v_bl = fy * (h / z_near) + cy
 
     src_points = np.float32([[u_tl, v_tl], [u_tr, v_tr], [u_br, v_br], [u_bl, v_bl]])
     bev_width, bev_height = (800, 800)
@@ -105,7 +102,7 @@ left_tracker = LineTracker(alpha=0.20)
 right_tracker = LineTracker(alpha=0.20)
 
 # ==============================================================================
-# 5. ALGORITMO GOLD (Core Requirement)
+# 5. ALGORITMO GOLD E CLASSIFICAZIONE (+ REINTEGRO ANTI-ZEBRATURE)
 # ==============================================================================
 def iterative_thresholding(img):
     active_pixels = img[img > 0]
@@ -127,7 +124,6 @@ def apply_gold_filter(bev_image):
     left_diff = np.zeros_like(blur)
     right_diff = np.zeros_like(blur)
     
-    # GOLD Spatial Filter: Dark - Light - Dark
     left_diff[:, tau:] = blur[:, tau:] - blur[:, :-tau]
     right_diff[:, :-tau] = blur[:, :-tau] - blur[:, tau:]
     gold_filter = np.minimum(left_diff, right_diff)
@@ -135,96 +131,101 @@ def apply_gold_filter(bev_image):
     
     th_opt = iterative_thresholding(gold_filter)
     _, thresh = cv2.threshold(gold_filter, max(12, th_opt * 0.8), 255, cv2.THRESH_BINARY)
-    
-    # Pulizia morfologica base
     thresh = thresh.astype(np.uint8)
+
+    # --- REINTEGRO: FILTRO ATTRAVERSAMENTI PEDONALI ---
+    row_occupancy = np.sum(thresh // 255, axis=1)
+    row_occ_threshold = int(0.18 * BEV_SIZE[0])
+    crosswalk_rows = row_occupancy > row_occ_threshold
+    if np.any(crosswalk_rows):
+        crosswalk_rows = cv2.dilate(crosswalk_rows.astype(np.uint8).reshape(-1, 1), np.ones((11, 1), np.uint8), iterations=1).reshape(-1) > 0
+        thresh[crosswalk_rows, :] = 0
+
+    # --- REINTEGRO: FILTRO ORIZZONTALE AGGIUNTIVO ---
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 5))
+    horizontal_mask = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_kernel)
+    if np.count_nonzero(horizontal_mask) > 0:
+        horizontal_mask = cv2.dilate(horizontal_mask, np.ones((5, 5), np.uint8), iterations=1)
+        thresh = cv2.bitwise_and(thresh, cv2.bitwise_not(horizontal_mask))
+
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5))
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     return thresh
 
-# ==============================================================================
-# 6. SLIDING WINDOW E CLASSIFICAZIONE INTELLIGENTE
-# ==============================================================================
 def classify_lane_type(y_coords):
-    """
-    Analizza i pixel trovati. Se ci sono ampi buchi verticali e il 
-    rapporto di riempimento è basso, classifica la linea come tratteggiata.
-    """
-    if len(y_coords) < 50:
-        return "dashed"
-        
+    if len(y_coords) < 50: return "dashed"
     unique_y = np.unique(y_coords)
     span = unique_y.max() - unique_y.min()
-    if span == 0: 
-        return "dashed"
-        
-    # Calcola il rapporto tra i pixel accesi e la lunghezza totale della linea
+    if span == 0: return "dashed"
     fill_ratio = len(unique_y) / float(span)
-    
-    # Trova le interruzioni: quanti salti verticali sono maggiori di 15 pixel?
     gaps = np.sum(np.diff(unique_y) > 15) 
-    
-    # Se la linea è piena per meno del 70% e ha almeno 2 buchi netti, è tratteggiata
-    if fill_ratio < 0.70 and gaps >= 2:
-        return "dashed"
+    if fill_ratio < 0.70 and gaps >= 2: return "dashed"
     return "continuous"
 
 def find_lane_pixels_sliding_window(binary_warped):
     histogram = np.sum(binary_warped[binary_warped.shape[0]//2:, :], axis=0)
     midpoint = int(histogram.shape[0]//2)
+    
+    # Valori di picco e coordinate iniziali
+    left_peak_val = np.max(histogram[:midpoint])
+    right_peak_val = np.max(histogram[midpoint:])
+    
     leftx_base = np.argmax(histogram[:midpoint])
     rightx_base = np.argmax(histogram[midpoint:]) + midpoint
 
-    nwindows = 12
-    margin = 50
-    minpix = 30
+    # --- REINTEGRO 5: SANITY CHECK LARGHEZZA CORSIA ---
+    # Tolleranza: la corsia non può essere più stretta di 250px o più larga di 600px
+    lane_width = rightx_base - leftx_base
+    if lane_width < 250 or lane_width > 600:
+        # Teniamo la linea più evidente e scartiamo il falso positivo
+        if left_peak_val > right_peak_val:
+            rightx_base = None
+        else:
+            leftx_base = None
+
+    nwindows = 12; margin = 50; minpix = 30
     window_height = int(binary_warped.shape[0]//nwindows)
     
     nonzero = binary_warped.nonzero()
-    nonzeroy = np.array(nonzero[0])
-    nonzerox = np.array(nonzero[1])
+    nonzeroy = np.array(nonzero[0]); nonzerox = np.array(nonzero[1])
     
-    leftx_current = leftx_base
-    rightx_current = rightx_base
-    
-    left_lane_inds = []
-    right_lane_inds = []
+    leftx_current, rightx_current = leftx_base, rightx_base
+    left_lane_inds, right_lane_inds = [], []
 
     for window in range(nwindows):
         win_y_low = binary_warped.shape[0] - (window+1)*window_height
         win_y_high = binary_warped.shape[0] - window*window_height
         
-        win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
-        win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
-        
-        good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
-                          (nonzerox >= win_xleft_low) &  (nonzerox < win_xleft_high)).nonzero()[0]
-        good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
-                           (nonzerox >= win_xright_low) &  (nonzerox < win_xright_high)).nonzero()[0]
-        
-        left_lane_inds.append(good_left_inds)
-        right_lane_inds.append(good_right_inds)
-        
-        if len(good_left_inds) > minpix: leftx_current = int(np.mean(nonzerox[good_left_inds]))
-        if len(good_right_inds) > minpix: rightx_current = int(np.mean(nonzerox[good_right_inds]))
+        if leftx_current is not None:
+            win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
+            good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & (nonzerox >= win_xleft_low) &  (nonzerox < win_xleft_high)).nonzero()[0]
+            left_lane_inds.append(good_left_inds)
+            if len(good_left_inds) > minpix: leftx_current = int(np.mean(nonzerox[good_left_inds]))
+            
+        if rightx_current is not None:
+            win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
+            good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & (nonzerox >= win_xright_low) &  (nonzerox < win_xright_high)).nonzero()[0]
+            right_lane_inds.append(good_right_inds)
+            if len(good_right_inds) > minpix: rightx_current = int(np.mean(nonzerox[good_right_inds]))
 
-    left_lane_inds = np.concatenate(left_lane_inds)
-    right_lane_inds = np.concatenate(right_lane_inds)
+    left_fit = right_fit = l_type = r_type = None
 
-    leftx, lefty = nonzerox[left_lane_inds], nonzeroy[left_lane_inds]
-    rightx, righty = nonzerox[right_lane_inds], nonzeroy[right_lane_inds]
-    
-    left_fit = np.polyfit(lefty, leftx, 1) if len(lefty) > 50 else None
-    right_fit = np.polyfit(righty, rightx, 1) if len(righty) > 50 else None
-    
-    # === CLASSIFICAZIONE INTELLIGENTE ===
-    l_type = classify_lane_type(lefty) if len(lefty) > 0 else "continuous"
-    r_type = classify_lane_type(righty) if len(righty) > 0 else "continuous"
+    if leftx_base is not None:
+        left_lane_inds = np.concatenate(left_lane_inds)
+        leftx, lefty = nonzerox[left_lane_inds], nonzeroy[left_lane_inds]
+        left_fit = np.polyfit(lefty, leftx, 1) if len(lefty) > 50 else None
+        l_type = classify_lane_type(lefty) if len(lefty) > 0 else "continuous"
+        
+    if rightx_base is not None:
+        right_lane_inds = np.concatenate(right_lane_inds)
+        rightx, righty = nonzerox[right_lane_inds], nonzeroy[right_lane_inds]
+        right_fit = np.polyfit(righty, rightx, 1) if len(righty) > 50 else None
+        r_type = classify_lane_type(righty) if len(righty) > 0 else "continuous"
 
     return left_fit, right_fit, l_type, r_type
 
 # ==============================================================================
-# 7. RILEVAMENTO OSTACOLI (YOLO)
+# 6. RILEVAMENTO OSTACOLI (+ REINTEGRO FUSIONE IoA)
 # ==============================================================================
 def detect_obstacles(frame):
     h_frame, w_frame = frame.shape[:2]
@@ -249,20 +250,51 @@ def detect_obstacles(frame):
                 class_ids.append(class_id)
                 
     indices = cv2.dnn.NMSBoxes(boxes, confidences, score_threshold=0.3, nms_threshold=0.4)
-    results = []
+    raw_results = []
+    
+    cx, cy = PRINCIPAL_POINT
+    fx, fy = FOCAL_LENGTH
+    
     if len(indices) > 0:
         for i in indices.flatten():
             x, y, w, h = boxes[i]
             v_bottom = y + h
-            cx, cy = PRINCIPAL_POINT
-            fx, fy = FOCAL_LENGTH
             distance = fy * CAMERA_POSITION_Z / float(v_bottom - cy) if v_bottom > cy else -1
-            if distance > 0:
-                results.append({'class_name': YOLO_CLASSES[class_ids[i]], 'box': (x, y, w, h), 'distance': distance})
-    return results
+            raw_results.append({'class_name': YOLO_CLASSES[class_ids[i]], 'confidence': confidences[i], 'box': (x, y, w, h), 'distance': distance})
+            
+    # --- REINTEGRO: FUSIONE DEI BOUNDING BOX (IoA) ---
+    merged_results = []
+    for r in raw_results:
+        x, y, w, h = r['box']
+        area_r = w * h
+        is_merged = False
+        
+        for mr in merged_results:
+            mx, my, mw, mh = mr['box']
+            area_m = mw * mh
+            ix = max(x, mx); iy = max(y, my)
+            iw = min(x + w, mx + mw) - ix; ih = min(y + h, my + mh) - iy
+            
+            if iw > 0 and ih > 0:
+                inter_area = iw * ih
+                if inter_area / min(area_r, area_m) > 0.6: 
+                    new_x = min(x, mx); new_y = min(y, my)
+                    new_w = max(x + w, mx + mw) - new_x; new_h = max(y + h, my + mh) - new_y
+                    mr['box'] = (new_x, new_y, new_w, new_h)
+                    v_bottom_new = new_y + new_h
+                    if v_bottom_new > cy:
+                        mr['distance'] = fy * CAMERA_POSITION_Z / float(v_bottom_new - cy)
+                    mr['confidence'] = max(r['confidence'], mr['confidence'])
+                    is_merged = True
+                    break
+                    
+        if not is_merged:
+            merged_results.append(r)
+            
+    return merged_results
 
 # ==============================================================================
-# 8. MAIN LOOP
+# 7. MAIN LOOP
 # ==============================================================================
 def main():
     search_path = sys.argv[1] if len(sys.argv) > 1 else 'PandaSetSensorData/archive/008/Camera/front_camera/*.jpg'
@@ -277,66 +309,114 @@ def main():
         frame = cv2.imread(img_path)
         if frame is None: continue
         
-        # 1. Prospettiva
+        # 1. Prospettiva e GOLD
         bev = apply_ipm(frame)
-        
-        # 2. Filtro GOLD
         binary_gold = apply_gold_filter(bev)
         
-        # 3. Sliding Window
+        # 2. Tracking e Tipi
         l_fit_raw, r_fit_raw, l_type_raw, r_type_raw = find_lane_pixels_sliding_window(binary_gold)
-        
-        # 4. Smoothing con i Tracker
         l_fit = left_tracker.update(l_fit_raw, l_type_raw)
         r_fit = right_tracker.update(r_fit_raw, r_type_raw)
         
-        l_type = left_tracker.get_stable_type()
-        r_type = right_tracker.get_stable_type()
+        # Se non ho la linea ma è tracciata nella memoria EMA, uso quella stabilizzata
+        l_type = left_tracker.get_stable_type() if l_fit is not None else None
+        r_type = right_tracker.get_stable_type() if r_fit is not None else None
 
-        # 5. Disegno Linee su originale
+        # 3. Disegno Linee su Frame e su BEV
         ploty = np.linspace(0, BEV_SIZE[1]-1, BEV_SIZE[1])
         frame_out = frame.copy()
+        bev_vis = bev.copy()
         
         lanes_found = False
         for fit, ltype, side_label in [(l_fit, l_type, "SX"), (r_fit, r_type, "DX")]:
-            if fit is not None:
+            if fit is not None and ltype is not None:
                 lanes_found = True
                 fitx = np.polyval(fit, ploty)
                 pts_bev = np.array([np.transpose(np.vstack([fitx, ploty]))], dtype=np.float32)
+                
                 pts_orig = cv2.perspectiveTransform(pts_bev, INV_IPM_MATRIX)
                 pts_orig = np.int32(pts_orig[0])
+                pts_bev_int = np.int32(pts_bev[0])
                 
-                # Testo per mostrare la classificazione
                 text_pos = tuple(pts_orig[-10]) if len(pts_orig) > 10 else tuple(pts_orig[-1])
                 label_text = f"{side_label}: Tratt." if ltype == "dashed" else f"{side_label}: Continua"
-                cv2.putText(frame_out, label_text, (text_pos[0] - 50, text_pos[1] - 20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(frame_out, label_text, (text_pos[0] - 50, text_pos[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
                 
-                # Tratteggiata vs Continua (Disegno visivo)
                 if ltype == "dashed":
-                    for i in range(0, len(pts_orig)-15, 25): # Salta dei segmenti per l'effetto tratteggiato
-                        cv2.line(frame_out, tuple(pts_orig[i]), tuple(pts_orig[i+15]), (0, 255, 0), 5)
+                    for i in range(0, len(pts_orig)-10, 50): 
+                        cv2.line(frame_out, tuple(pts_orig[i]), tuple(pts_orig[i+10]), (0, 255, 0), 5)
+                    for i in range(0, len(pts_bev_int)-20, 60):
+                        cv2.line(bev_vis, tuple(pts_bev_int[i]), tuple(pts_bev_int[i+20]), (0, 255, 0), 6)
                 else:
                     cv2.polylines(frame_out, [pts_orig], False, (0, 255, 0), 5)
+                    cv2.polylines(bev_vis, [pts_bev_int], False, (0, 255, 0), 6)
 
         if not lanes_found:
             cv2.putText(frame_out, "No lanes found", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+            cv2.putText(bev_vis, "No lanes found", (200, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
 
-        # 6. Disegno Ostacoli (YOLO)
+        # 4. Disegno Ostacoli + CIPV (Closest In-Path Vehicle)
         obstacles = detect_obstacles(frame)
+        ego_obstacles = []
+        
         for obs in obstacles:
             x, y, w, h = obs['box']
             dist = obs['distance']
-            cv2.rectangle(frame_out, (x, y), (x+w, y+h), (0, 0, 255), 2)
-            cv2.putText(frame_out, f"{obs['class_name']} {dist:.1f}m", (x, y-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # Disegna grigi/neutri gli ostacoli generici non pericolosi
+            cv2.rectangle(frame_out, (x, y), (x+w, y+h), (180, 180, 180), 1)
+            
+            if dist > 0:
+                u_center = x + w / 2.0; v_bottom = y + h
+                pts_orig_bottom = np.array([[[u_center, float(v_bottom)]]], dtype=np.float32)
+                pts_bev_bottom = cv2.perspectiveTransform(pts_orig_bottom, IPM_MATRIX)
+                bev_x = pts_bev_bottom[0][0][0]; bev_y = pts_bev_bottom[0][0][1]
+                
+                margin = 35
+                in_lane = False
+                
+                if l_fit is not None and r_fit is not None:
+                    left_bound = np.polyval(l_fit, bev_y); right_bound = np.polyval(r_fit, bev_y)
+                    if (left_bound - margin) <= bev_x <= (right_bound + margin): in_lane = True
+                elif l_fit is not None:
+                    left_bound = np.polyval(l_fit, bev_y)
+                    if (left_bound - margin) <= bev_x <= (left_bound + 350 + margin): in_lane = True
+                elif r_fit is not None:
+                    right_bound = np.polyval(r_fit, bev_y)
+                    if (right_bound - 350 - margin) <= bev_x <= (right_bound + margin): in_lane = True
+                else:
+                    if 200 <= bev_x <= 600: in_lane = True
 
-        # Mostra risultato
-        cv2.imshow("GOLD + Sliding Window + YOLO", cv2.resize(frame_out, (1280, 720)))
-        cv2.imshow("GOLD Filter (BEV)", cv2.resize(binary_gold, (400, 400)))
+                if in_lane:
+                    ego_obstacles.append(obs)
+
+        # Allarme SOLO IL PIU' VICINO IN CORSIA (CIPV)
+        if ego_obstacles:
+            closest_obs = min(ego_obstacles, key=lambda o: o['distance'])
+            cx, cy, cw, ch = closest_obs['box']
+            cdist = closest_obs['distance']
+            
+            cv2.rectangle(frame_out, (cx, cy), (cx+cw, cy+ch), (0, 0, 255), 3)
+            cv2.putText(frame_out, f"WARNING: OSTACOLO A {cdist:.1f}m!", (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
+
+        # 5. AFFIANCAMENTO
+        TARGET_HEIGHT = 540 
+        
+        h_orig, w_orig = frame_out.shape[:2]
+        w_orig_new = int(w_orig * (TARGET_HEIGHT / float(h_orig)))
+        frame_resized = cv2.resize(frame_out, (w_orig_new, TARGET_HEIGHT))
+        
+        h_bev, w_bev = bev_vis.shape[:2]
+        w_bev_new = int(w_bev * (TARGET_HEIGHT / float(h_bev)))
+        bev_resized = cv2.resize(bev_vis, (w_bev_new, TARGET_HEIGHT))
+        
+        combined_view = np.hstack((frame_resized, bev_resized))
+        
+        cv2.namedWindow("Driver View (sx) & Bird's Eye View (dx)", cv2.WINDOW_NORMAL)
+        cv2.imshow("Driver View (sx) & Bird's Eye View (dx)", combined_view)
         
         key = cv2.waitKey(0) & 0xFF
-        if key == 27: break # ESC per uscire
+        if key == 27: break
 
     cv2.destroyAllWindows()
 
